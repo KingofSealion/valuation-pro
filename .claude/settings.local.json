@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /b \"d:\\\\valuation_pro\\\\*.py\")",
+      "Bash(Get-ChildItem -Path \"d:\\\\valuation_pro\" -Filter \"*.py\" -File)",
+      "Bash(Select-Object -ExpandProperty Name)"
+    ]
+  }
+}

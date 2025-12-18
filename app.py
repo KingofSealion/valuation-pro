@@ -16,17 +16,76 @@ from dcf_model import WallStreetDCF, DCFAssumptions, create_football_field_data,
 
 st.set_page_config(page_title="DCF Valuation Pro", page_icon="💰", layout="wide")
 
+# 다크/라이트 모드 호환 CSS
 st.markdown("""
 <style>
-    .main-title { font-size: 2.2rem; font-weight: bold; color: #1e3a5f; }
-    .info-box { background: #e7f3ff; padding: 15px; border-radius: 8px; border-left: 4px solid #1e3a5f; margin: 10px 0; }
-    .warning-box { background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107; margin: 10px 0; }
-    .success-box { background: #d4edda; padding: 15px; border-radius: 8px; border-left: 4px solid #28a745; margin: 10px 0; }
+    /* 메인 타이틀 - 테마 색상 사용 */
+    .main-title {
+        font-size: 2.2rem;
+        font-weight: bold;
+        color: var(--text-color);
+    }
+
+    /* 정보 박스 - 파란색 계열 (테마 호환) */
+    .info-box {
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid #3b82f6;
+        margin: 10px 0;
+        background: rgba(59, 130, 246, 0.1);
+        color: inherit;
+    }
+
+    /* 경고 박스 - 노란색 계열 (테마 호환) */
+    .warning-box {
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid #f59e0b;
+        margin: 10px 0;
+        background: rgba(245, 158, 11, 0.1);
+        color: inherit;
+    }
+
+    /* 성공 박스 - 초록색 계열 (테마 호환) */
+    .success-box {
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid #10b981;
+        margin: 10px 0;
+        background: rgba(16, 185, 129, 0.1);
+        color: inherit;
+    }
+
+    /* 에러 박스 - 빨간색 계열 (테마 호환) */
+    .error-box {
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid #ef4444;
+        margin: 10px 0;
+        background: rgba(239, 68, 68, 0.1);
+        color: inherit;
+    }
+
+    /* 강조 텍스트 */
+    .highlight-green { color: #10b981; font-weight: bold; }
+    .highlight-red { color: #ef4444; font-weight: bold; }
+    .highlight-blue { color: #3b82f6; font-weight: bold; }
+    .highlight-yellow { color: #f59e0b; font-weight: bold; }
+
+    /* 다크모드에서 테이블 가독성 향상 */
+    .stDataFrame {
+        border-radius: 8px;
+    }
+
+    /* 메트릭 카드 스타일 */
+    [data-testid="stMetricValue"] {
+        font-size: 1.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<p class="main-title">💰 Wall Street DCF Valuation</p>', unsafe_allow_html=True)
-st.caption("3Y CAGR 기반 | Bull/Bear = Revenue Growth + Exit Multiple만 조절")
+st.caption("3Y CAGR 기반 | Mid-year Convention | Bull/Bear = 비율 기반 조정")
 
 # Sidebar
 with st.sidebar:
@@ -107,16 +166,16 @@ if analyze_btn:
         cagr_3y = hist_avg.get('cagr_3y', 0)
         cagr_5y = hist_avg.get('cagr_5y', 0)
         base_growth = hist_avg.get('base_growth', 0.05)
-        growth_cap = hist_avg.get('growth_cap', 0.15)
+        sector_cap = hist_avg.get('sector_cap', 0.15)
         
+        blended_growth = hist_avg.get('blended_growth', 0)
         st.markdown(f"""
         <div class="info-box">
-        <b>📊 Base Growth 계산 (자동)</b><br>
+        <b>📊 Base Growth (회사 실제 데이터 기반)</b><br>
         • 3Y CAGR: <b>{cagr_3y*100:.1f}%</b><br>
         • 5Y CAGR: <b>{cagr_5y*100:.1f}%</b><br>
-        • 가중평균 (3Y×70% + 5Y×30%): <b>{(cagr_3y*0.7 + cagr_5y*0.3)*100:.1f}%</b><br>
-        • 섹터 Cap ({data['sector']}): <b>{growth_cap*100:.0f}%</b><br>
-        → <b style="color:#28a745">Base Growth: {base_growth*100:.1f}%</b>
+        • 가중평균: <b>{blended_growth*100:.1f}%</b><br>
+        → <span class="highlight-green">Base Growth: {base_growth*100:.1f}%</span> (상한 80%)
         </div>
         """, unsafe_allow_html=True)
         
@@ -153,59 +212,78 @@ if analyze_btn:
         nwc_pct = m4.number_input("NWC (%)", value=hist_avg['avg_nwc_pct']*100, step=0.5) / 100
         
         st.divider()
-        
+
         # ===== Terminal Value =====
         st.markdown("### 🎯 Terminal Value")
-        
+
+        # 현재 거래 배수 및 추천 배수 표시
+        current_ev_ebitda = hist_avg.get('current_ev_ebitda', 0)
+        suggested_exit = hist_avg.get('suggested_exit_multiple', sector_defaults.get('exit_multiple', 12))
+
+        if current_ev_ebitda and current_ev_ebitda > 0:
+            st.markdown(f"""
+            <div class="info-box">
+            <b>📊 Exit Multiple 기준</b><br>
+            • 현재 EV/EBITDA: <b>{current_ev_ebitda:.1f}x</b><br>
+            • 섹터 평균: <b>{sector_defaults.get('exit_multiple', 12):.0f}x</b><br>
+            → <span class="highlight-blue">추천 Exit (현재의 70%): {suggested_exit:.1f}x</span>
+            </div>
+            """, unsafe_allow_html=True)
+
         tv1, tv2 = st.columns(2)
-        
+
         terminal_growth = tv1.number_input("Perpetual Growth (%)", value=2.5, min_value=1.0, max_value=4.0, step=0.1) / 100
-        exit_multiple = tv2.number_input("Exit EV/EBITDA", value=float(sector_defaults.get('exit_multiple', 12)), min_value=4.0, max_value=30.0, step=0.5)
-        
+        exit_multiple = tv2.number_input("Exit EV/EBITDA", value=float(suggested_exit), min_value=4.0, max_value=50.0, step=0.5)
+
         st.divider()
         
         # ===== Bull/Bear 조절 (★ 핵심: 2개만!) =====
         st.markdown("### 🎭 Bull / Bear 조절")
-        
+
         st.markdown("""
         <div class="warning-box">
         💡 <b>Bull/Bear는 2개 변수만 조절합니다:</b><br>
-        1. <b>Revenue Growth</b> (성장 스토리)<br>
-        2. <b>Exit Multiple</b> (시장 센티먼트)
+        1. <b>Revenue Growth</b> (성장 스토리) - 비율 조정<br>
+        2. <b>Exit Multiple</b> (시장 센티먼트) - 비율 조정
         </div>
         """, unsafe_allow_html=True)
-        
+
         bb1, bb2 = st.columns(2)
-        
+
         with bb1:
-            st.markdown("**Revenue Growth Delta**")
-            bull_growth_delta = st.slider("Bull: Base + (%p)", 0.0, 15.0, 5.0, 0.5) / 100
-            bear_growth_delta = st.slider("Bear: Base - (%p)", 0.0, 15.0, 5.0, 0.5) / 100
-        
+            st.markdown("**Revenue Growth 조정**")
+            bull_growth_factor = st.slider("Bull: Base × ", 1.0, 1.5, 1.20, 0.05)
+            bear_growth_factor = st.slider("Bear: Base × ", 0.5, 1.0, 0.70, 0.05)
+
         with bb2:
-            st.markdown("**Exit Multiple Delta**")
-            bull_multiple_delta = st.slider("Bull: Base + (x)", 0.0, 6.0, 2.0, 0.5)
-            bear_multiple_delta = st.slider("Bear: Base - (x)", 0.0, 6.0, 2.0, 0.5)
-        
+            st.markdown("**Exit Multiple 조정**")
+            bull_multiple_factor = st.slider("Bull: Base × ", 1.0, 1.5, 1.15, 0.05)
+            bear_multiple_factor = st.slider("Bear: Base × ", 0.5, 1.0, 0.85, 0.05)
+
         # 시나리오 미리보기
         st.markdown("**시나리오 미리보기**")
-        
+
+        bull_g = min(base_growth * bull_growth_factor, 0.80)
+        bear_g = max(base_growth * bear_growth_factor, 0.0)
+        bull_m = min(exit_multiple * bull_multiple_factor, 35)
+        bear_m = max(exit_multiple * bear_multiple_factor, 5)
+
         preview_df = pd.DataFrame({
             'Scenario': ['🐻 Bear', '📊 Base', '🐂 Bull'],
             'Revenue Growth Y1': [
-                f"{max(base_growth - bear_growth_delta, 0)*100:.1f}%",
+                f"{bear_g*100:.1f}%",
                 f"{base_growth*100:.1f}%",
-                f"{min(base_growth + bull_growth_delta, 0.40)*100:.1f}%"
+                f"{bull_g*100:.1f}%"
             ],
             'Exit Multiple': [
-                f"{max(exit_multiple - bear_multiple_delta, 4):.1f}x",
+                f"{bear_m:.1f}x",
                 f"{exit_multiple:.1f}x",
-                f"{exit_multiple + bull_multiple_delta:.1f}x"
+                f"{bull_m:.1f}x"
             ]
         })
-        
+
         st.dataframe(preview_df, use_container_width=True, hide_index=True)
-        
+
         # 저장
         st.session_state['assumptions'] = {
             'revenue_growth': revenue_growth,
@@ -217,10 +295,10 @@ if analyze_btn:
             'exit_multiple': exit_multiple,
             'wacc': wacc,
             'tax_rate': tax_rate,
-            'bull_growth_delta': bull_growth_delta,
-            'bear_growth_delta': bear_growth_delta,
-            'bull_multiple_delta': bull_multiple_delta,
-            'bear_multiple_delta': bear_multiple_delta,
+            'bull_growth_factor': bull_growth_factor,
+            'bear_growth_factor': bear_growth_factor,
+            'bull_multiple_factor': bull_multiple_factor,
+            'bear_multiple_factor': bear_multiple_factor,
         }
         st.session_state['dcf_model'] = dcf_model
         st.session_state['stock_data'] = data
@@ -237,25 +315,32 @@ if analyze_btn:
         
         a = st.session_state['assumptions']
         dcf_model = st.session_state['dcf_model']
-        
+
         scenarios = dcf_model.run_scenarios(
             base_assumptions=a,
             wacc=a['wacc'],
             tax_rate=a['tax_rate'],
-            bull_growth_delta=a['bull_growth_delta'],
-            bear_growth_delta=a['bear_growth_delta'],
-            bull_multiple_delta=a['bull_multiple_delta'],
-            bear_multiple_delta=a['bear_multiple_delta'],
+            bull_growth_factor=a['bull_growth_factor'],
+            bear_growth_factor=a['bear_growth_factor'],
+            bull_multiple_factor=a['bull_multiple_factor'],
+            bear_multiple_factor=a['bear_multiple_factor'],
         )
         
         st.session_state['scenarios'] = scenarios
-        
-        # Sanity Check
+
+        # Sanity Check & Warnings
         sanity = scenarios['base'].get('sanity_check', {})
+        warnings_list = scenarios['base'].get('warnings', [])
+
         if sanity.get('pass'):
             st.markdown(f'<div class="success-box">✅ FCF Sanity Check: {sanity.get("message")}</div>', unsafe_allow_html=True)
         else:
             st.markdown(f'<div class="warning-box">⚠️ {sanity.get("message")}</div>', unsafe_allow_html=True)
+
+        # 모델 경고 표시
+        if warnings_list:
+            warnings_html = "<br>".join([f"• {w}" for w in warnings_list])
+            st.markdown(f'<div class="warning-box">⚠️ <b>Model Warnings:</b><br>{warnings_html}</div>', unsafe_allow_html=True)
         
         # Projections
         st.markdown("### 📊 Base Case Projections")
@@ -362,7 +447,44 @@ if analyze_btn:
             wp = summary['weighted_perpetuity']
             we = summary.get('weighted_exit', 0)
             st.info(f"**Probability-Weighted (25/50/25):** Perpetuity ${wp:.2f} ({(wp/current-1)*100:+.1f}%) | Exit ${we:.2f} ({(we/current-1)*100:+.1f}%)")
-    
+
+        # ===== Reverse DCF (★ 시장 기대 성장률) =====
+        st.markdown("### 🔄 Reverse DCF")
+        st.caption("현재 주가가 암시하는 성장률 (시장이 기대하는 성장률)")
+
+        reverse_result = dcf_model.reverse_dcf(
+            base_assumptions=a,
+            wacc=a['wacc'],
+            tax_rate=a['tax_rate'],
+            years=5
+        )
+
+        if 'error' not in reverse_result:
+            implied_g = reverse_result['implied_growth']
+            rating = reverse_result['rating']
+            feasibility = reverse_result['feasibility']
+
+            # 등급에 따른 색상
+            if rating == "Conservative":
+                rating_color = "highlight-green"
+            elif rating == "Reasonable":
+                rating_color = "highlight-blue"
+            elif rating == "Slightly Aggressive":
+                rating_color = "highlight-yellow"
+            else:
+                rating_color = "highlight-red"
+
+            st.markdown(f"""
+            <div class="info-box">
+            <b>📊 시장이 가정하는 성장률</b><br>
+            • Implied Growth (Y1): <span class="{rating_color}">{implied_g*100:.1f}%</span><br>
+            • 과거 3Y CAGR: <b>{reverse_result['historical_cagr_3y']*100:.1f}%</b><br>
+            • 평가: <span class="{rating_color}">{feasibility}</span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.warning(reverse_result.get('message', 'Reverse DCF 계산 불가'))
+
     # ==================== TAB 3: Sensitivity ====================
     with tab3:
         st.subheader("🎯 Sensitivity Analysis")
@@ -418,9 +540,10 @@ if analyze_btn:
         
         if ff_data:
             fig = go.Figure()
-            
-            colors = ['#1e3a5f', '#28a745', '#ffc107', '#17a2b8']
-            
+
+            # 테마 호환 색상 (밝은 색상으로 다크/라이트 모두 가시성 확보)
+            colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6']
+
             for i, row in enumerate(ff_data):
                 fig.add_trace(go.Bar(
                     y=[row['category']],
@@ -428,53 +551,67 @@ if analyze_btn:
                     base=[row['low']],
                     orientation='h',
                     marker_color=colors[i % len(colors)],
+                    marker_line=dict(width=1, color='rgba(255,255,255,0.3)'),
                     text=f"${row['low']:.0f} - ${row['high']:.0f}",
                     textposition='inside',
+                    textfont=dict(color='white', size=12),
                     name=row['category']
                 ))
-                
+
                 fig.add_trace(go.Scatter(
                     x=[row['mid']],
                     y=[row['category']],
                     mode='markers',
-                    marker=dict(size=12, color='white', symbol='diamond', line=dict(width=2, color='black')),
+                    marker=dict(size=14, color='#fbbf24', symbol='diamond',
+                               line=dict(width=2, color='white')),
                     showlegend=False,
+                    hovertemplate=f"Mid: ${row['mid']:.2f}<extra></extra>"
                 ))
-            
-            fig.add_vline(x=data['current_price'], line_dash="dash", line_color="red", line_width=2,
-                         annotation_text=f"Current: ${data['current_price']:.2f}")
-            
+
+            fig.add_vline(x=data['current_price'], line_dash="dash", line_color="#ef4444", line_width=2,
+                         annotation_text=f"Current: ${data['current_price']:.2f}",
+                         annotation_font_color="#ef4444")
+
             fig.update_layout(
-                title="Valuation Range",
+                title=dict(text="Valuation Range", font=dict(size=16)),
                 xaxis_title="Share Price ($)",
-                height=350,
+                height=400,
                 showlegend=False,
-                margin=dict(l=150)
+                margin=dict(l=150, r=50, t=50, b=50),
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                xaxis=dict(gridcolor='rgba(128,128,128,0.2)', zerolinecolor='rgba(128,128,128,0.2)'),
+                yaxis=dict(gridcolor='rgba(128,128,128,0.2)'),
+                font=dict(color='gray')
             )
-            
+
             st.plotly_chart(fig, use_container_width=True)
 
 if not analyze_btn:
     st.info("👈 Enter ticker and click 'Run Analysis'")
-    
+
     st.markdown("""
-    ### ✨ v3 Changes
-    
+    ### ✨ Key Features
+
     **1. Base Growth 자동 계산**
-    ```
-    Base = min(3Y CAGR × 70% + 5Y CAGR × 30%, 섹터 Cap)
-    ```
-    
-    **2. Bull/Bear 간소화**
-    - 조절하는 변수: **Revenue Growth**, **Exit Multiple** (2개만!)
-    - 나머지: Base 값 그대로 유지
-    
-    **3. 시나리오 비교**
+    - 3Y CAGR × 70% + 5Y CAGR × 30% 가중평균
+    - 섹터 Cap 초과 시 초과분의 50% 반영 (고성장 기업 대응)
+
+    **2. Mid-year Convention**
+    - 현금흐름이 연중에 발생한다고 가정
+    - 보다 정확한 현재가치 계산
+
+    **3. Bull/Bear 비율 조정**
     | Scenario | Rev Growth | Exit Multiple |
     |----------|------------|---------------|
-    | Bull | Base + Δ | Base + Δ |
+    | Bull | Base × 1.2 | Base × 1.15 |
     | Base | Base | Base |
-    | Bear | Base - Δ | Base - Δ |
+    | Bear | Base × 0.7 | Base × 0.85 |
+
+    **4. 개선된 경고 시스템**
+    - WACC-Growth spread 검증
+    - TV 비중 경고
+    - FCF Sanity Check
     """)
 
 st.divider()

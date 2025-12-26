@@ -6,6 +6,37 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
+
+def calculate_ttm_fcf(stock) -> float:
+    """
+    Quarterly 데이터를 사용해 TTM (Trailing Twelve Months) FCF 계산
+    yfinance info.freeCashflow는 종종 outdated되어 있어서 직접 계산
+    """
+    try:
+        qcf = stock.quarterly_cashflow
+        if qcf is None or qcf.empty:
+            # quarterly 데이터가 없으면 info에서 가져오기
+            return stock.info.get('freeCashflow', 0) or 0
+
+        # Free Cash Flow 행이 있으면 직접 사용
+        if 'Free Cash Flow' in qcf.index:
+            fcf_row = qcf.loc['Free Cash Flow'].head(4)
+            ttm_fcf = fcf_row.sum()
+            return float(ttm_fcf) if pd.notna(ttm_fcf) else 0
+
+        # 없으면 Operating Cash Flow - Capital Expenditure로 계산
+        if 'Operating Cash Flow' in qcf.index and 'Capital Expenditure' in qcf.index:
+            op_cf = qcf.loc['Operating Cash Flow'].head(4).sum()
+            capex = qcf.loc['Capital Expenditure'].head(4).sum()  # 이미 음수
+            ttm_fcf = op_cf + capex
+            return float(ttm_fcf) if pd.notna(ttm_fcf) else 0
+
+        # 둘 다 없으면 info에서 가져오기
+        return stock.info.get('freeCashflow', 0) or 0
+    except Exception:
+        return stock.info.get('freeCashflow', 0) or 0
+
+
 def get_stock_data(ticker: str) -> tuple:
     """
     미국 주식 종합 데이터 수집
@@ -60,9 +91,9 @@ def get_stock_data(ticker: str) -> tuple:
             'current_assets': info.get('totalCurrentAssets', 0),
             'current_liabilities': info.get('totalCurrentLiabilities', 0),
             
-            # 현금흐름
+            # 현금흐름 (TTM은 quarterly 데이터로 계산)
             'operating_cf': info.get('operatingCashflow', 0),
-            'fcf': info.get('freeCashflow', 0),
+            'fcf': calculate_ttm_fcf(stock),  # quarterly 기반 TTM FCF
             
             # 비율
             'gross_margin': info.get('grossMargins', 0) or 0,

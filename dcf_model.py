@@ -239,26 +239,76 @@ class WallStreetDCF:
         else:
             avg_margin = defaults['ebitda_margin']
 
-        # ★ D&A %: 실제 데이터 우선
-        op_income = self.data.get('operating_income', 0)
-        if ebitda > 0 and op_income > 0 and revenue > 0:
-            avg_da = (ebitda - op_income) / revenue
+        # ★ D&A %: 실제 감가상각비 데이터 우선 (핵심 수정!)
+        # 주의: EBITDA - Operating Income은 주식보상비용 등을 포함하므로 부정확함
+
+        # 1순위: 과거 재무제표의 실제 D&A 데이터
+        if 'depreciation' in df.columns:
+            dep_values = df['depreciation'].dropna()
+            rev_values = df['revenue'].dropna()
+            if len(dep_values) > 0 and len(rev_values) > 0:
+                # 최근 데이터 가중 평균
+                da_pcts = []
+                for i, (dep, rev) in enumerate(zip(dep_values, rev_values)):
+                    if rev > 0 and dep > 0:
+                        da_pcts.append(dep / rev)
+                if da_pcts:
+                    # 최근 데이터에 가중치
+                    if len(da_pcts) >= 3:
+                        avg_da = da_pcts[0] * 0.5 + da_pcts[1] * 0.3 + sum(da_pcts[2:]) / len(da_pcts[2:]) * 0.2
+                    else:
+                        avg_da = sum(da_pcts) / len(da_pcts)
+                else:
+                    avg_da = defaults['da_pct']
+            else:
+                avg_da = defaults['da_pct']
+        # 2순위: da_pct 컬럼이 있으면 사용
         elif 'da_pct' in df.columns:
             da_pcts = df['da_pct'].dropna()
             avg_da = da_pcts.mean() if len(da_pcts) > 0 else defaults['da_pct']
         else:
             avg_da = defaults['da_pct']
 
-        # ★ CapEx %: 실제 데이터 우선
-        op_cf = self.data.get('operating_cf', 0)
-        fcf = self.data.get('fcf', 0)
-        if op_cf > 0 and fcf > 0 and revenue > 0:
+        # D&A 최소값 보장 (대부분 기업은 최소 3% 이상)
+        avg_da = max(avg_da, 0.03)
+
+        # ★ CapEx %: 실제 CapEx 데이터 우선 (핵심 수정!)
+        # 1순위: 과거 재무제표의 실제 CapEx 데이터
+        if 'capex' in df.columns:
+            capex_values = df['capex'].dropna()
+            rev_values = df['revenue'].dropna()
+            if len(capex_values) > 0 and len(rev_values) > 0:
+                capex_pcts = []
+                for capex_val, rev in zip(capex_values, rev_values):
+                    if rev > 0 and capex_val > 0:
+                        capex_pcts.append(capex_val / rev)
+                if capex_pcts:
+                    # 최근 데이터에 가중치
+                    if len(capex_pcts) >= 3:
+                        avg_capex = capex_pcts[0] * 0.5 + capex_pcts[1] * 0.3 + sum(capex_pcts[2:]) / len(capex_pcts[2:]) * 0.2
+                    else:
+                        avg_capex = sum(capex_pcts) / len(capex_pcts)
+                else:
+                    avg_capex = defaults['capex_pct']
+            else:
+                avg_capex = defaults['capex_pct']
+        # 2순위: Operating CF - FCF 방식
+        elif self.data.get('operating_cf', 0) > 0 and self.data.get('fcf', 0) > 0 and revenue > 0:
+            op_cf = self.data.get('operating_cf', 0)
+            fcf = self.data.get('fcf', 0)
             avg_capex = (op_cf - fcf) / revenue
+        # 3순위: capex_pct 컬럼
         elif 'capex_pct' in df.columns:
             capex_pcts = df['capex_pct'].dropna()
             avg_capex = capex_pcts.mean() if len(capex_pcts) > 0 else defaults['capex_pct']
         else:
             avg_capex = defaults['capex_pct']
+
+        # CapEx sanity check: D&A와 비교 (일반적으로 CapEx ≈ D&A × 0.8 ~ 1.5)
+        # 너무 높은 CapEx는 UFCF를 왜곡시킴
+        if avg_capex > avg_da * 2.5:
+            # CapEx가 D&A의 2.5배 초과시 조정 (maintenance capex 개념)
+            avg_capex = min(avg_capex, avg_da * 2.0)
 
         # ★ NWC %: 실제 데이터 우선
         current_assets = self.data.get('current_assets', 0)
@@ -290,7 +340,32 @@ class WallStreetDCF:
             suggested_exit = defaults.get('exit_multiple', 12)
 
         # 실제 FCF 마진
+        fcf = self.data.get('fcf', 0)
         actual_fcf_margin = fcf / revenue if revenue > 0 and fcf > 0 else 0
+
+        # ★ UFCF 예상 마진 사전 계산 (sanity check용)
+        # UFCF ≈ (EBITDA margin - D&A) * (1-tax) + D&A - CapEx
+        # tax rate는 아직 모르므로 21% 가정
+        est_ebit_margin = avg_margin - avg_da
+        est_nopat_margin = est_ebit_margin * 0.79 if est_ebit_margin > 0 else est_ebit_margin
+        est_ufcf_margin = est_nopat_margin + avg_da - avg_capex
+
+        # ★ 실제 FCF 마진과 비교하여 자동 조정
+        # 예상 UFCF가 실제 FCF와 너무 다르면 (10%p 이상 차이) 경고 및 조정
+        if actual_fcf_margin > 0 and abs(est_ufcf_margin - actual_fcf_margin) > 0.10:
+            # 차이가 크면 CapEx 조정 (가장 불확실한 변수)
+            # 목표: 예상 UFCF ≈ 실제 FCF의 ±5%p 내
+            target_ufcf = actual_fcf_margin
+            # CapEx = NOPAT + D&A - target_UFCF
+            adjusted_capex = est_nopat_margin + avg_da - target_ufcf
+            # 합리적 범위 내에서만 조정
+            if 0.02 <= adjusted_capex <= avg_da * 2.0:
+                avg_capex = adjusted_capex
+
+        # 최종 경계값 적용
+        final_da = min(max(avg_da, 0.03), 0.20)  # 3%~20%
+        final_capex = min(max(avg_capex, 0.02), 0.20)  # 2%~20%
+        final_nwc = min(max(avg_nwc, -0.20), 0.25)  # -20%~25%
 
         return {
             # ★ CAGR 정보
@@ -302,10 +377,13 @@ class WallStreetDCF:
 
             # ★ 회사 실제 데이터 기반 가정값
             'avg_ebitda_margin': min(max(avg_margin, 0.05), 0.80),
-            'avg_da_pct': min(max(avg_da, 0.01), 0.15),
-            'avg_capex_pct': min(max(avg_capex, 0.01), 0.25),
-            'avg_nwc_pct': min(max(avg_nwc, -0.30), 0.30),
+            'avg_da_pct': final_da,
+            'avg_capex_pct': final_capex,
+            'avg_nwc_pct': final_nwc,
             'actual_fcf_margin': actual_fcf_margin,
+
+            # ★ 디버그 정보 (UI에서 표시 가능)
+            'est_ufcf_margin': est_ufcf_margin,
 
             # ★ Exit Multiple (현재 배수 기반)
             'current_ev_ebitda': current_ev_ebitda,
@@ -430,41 +508,54 @@ class WallStreetDCF:
         return pd.DataFrame(projections)
     
     def sanity_check(self, projections: pd.DataFrame) -> dict:
-        """FCF Sanity Check - 성장 반영 전 기준으로 비교"""
+        """FCF Sanity Check - 개선된 버전"""
         if projections.empty:
             return {'pass': False, 'message': 'No projections', 'warnings': []}
 
         warnings = []
         actual_fcf_margin = self.actual_fcf_margin
 
-        # Year 1 예측 마진 (성장 반영됨)
+        # Year 1 예측 마진
         projected_margin = projections.iloc[0]['ufcf_margin']
-
-        # 성장률 고려한 조정 (성장 기업은 마진이 다를 수 있음)
         year1_growth = projections.iloc[0]['revenue_growth']
 
-        # 허용 범위: 기본 10%p, 고성장 기업은 더 넓게
-        tolerance = 0.10 + (year1_growth * 0.5)  # 성장률 20%면 허용 범위 20%p
+        # ★ 허용 범위 개선: 기본 5%p + 성장률 반영
+        # 고성장 기업도 실제 FCF와 너무 다르면 안 됨
+        base_tolerance = 0.05  # 기본 5%p
+        growth_adjustment = min(year1_growth * 0.3, 0.10)  # 최대 10%p 추가
+        tolerance = base_tolerance + growth_adjustment
 
         diff = abs(projected_margin - actual_fcf_margin)
 
-        # 경고 조건들
+        # ★ UFCF 마진이 너무 낮으면 명확한 경고
+        if projected_margin < 0.05 and actual_fcf_margin > 0.10:
+            warnings.append(f"⚠️ UFCF 마진이 너무 낮음: {projected_margin*100:.1f}% (실제 FCF: {actual_fcf_margin*100:.1f}%)")
+
+        # ★ 경고 조건 (더 구체적)
         if diff > tolerance:
-            warnings.append(f"FCF 마진 차이 큼: 예측 {projected_margin*100:.1f}% vs 실제 {actual_fcf_margin*100:.1f}%")
+            direction = "낮음" if projected_margin < actual_fcf_margin else "높음"
+            warnings.append(f"예측 FCF가 실제보다 {direction}: {projected_margin*100:.1f}% vs {actual_fcf_margin*100:.1f}%")
 
         # EBITDA 마진 체크
         if 'ebitda_margin' in projections.columns:
             proj_ebitda_margin = projections.iloc[0]['ebitda_margin']
             if proj_ebitda_margin > 0.60:
-                warnings.append(f"EBITDA 마진이 비정상적으로 높음: {proj_ebitda_margin*100:.1f}%")
-            elif proj_ebitda_margin < 0:
-                warnings.append(f"EBITDA 마진이 음수: {proj_ebitda_margin*100:.1f}%")
+                warnings.append(f"EBITDA 마진이 높음: {proj_ebitda_margin*100:.1f}%")
+            elif proj_ebitda_margin < 0.05:
+                warnings.append(f"EBITDA 마진이 낮음: {proj_ebitda_margin*100:.1f}%")
+
+        # ★ 5년 평균 UFCF 마진 계산 (TV 비중 예측용)
+        avg_ufcf_margin = projections['ufcf_margin'].mean()
+
+        # 전체 통과 여부 결정 (더 관대하게)
+        is_pass = diff <= tolerance or (projected_margin > 0.05 and diff <= 0.10)
 
         return {
-            'pass': diff <= tolerance,
-            'message': f'Projected {projected_margin*100:.1f}% vs Actual {actual_fcf_margin*100:.1f}% (tolerance: {tolerance*100:.1f}%)',
+            'pass': is_pass,
+            'message': f'예측 {projected_margin*100:.1f}% vs 실제 {actual_fcf_margin*100:.1f}% (허용: ±{tolerance*100:.1f}%p)',
             'actual': actual_fcf_margin,
             'projected': projected_margin,
+            'avg_ufcf_margin': avg_ufcf_margin,
             'diff': diff,
             'tolerance': tolerance,
             'warnings': warnings

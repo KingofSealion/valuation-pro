@@ -171,12 +171,6 @@ for fd in fcf_data:
 
 st.dataframe(pd.DataFrame(table_data).set_index('').T, use_container_width=True)
 
-# Raw FCF 값 표시 (디버깅용)
-with st.expander("🔍 Raw Data (디버깅용)"):
-    st.write(f"**TTM FCF (from yfinance):** ${ttm_fcf:,.0f}")
-    st.write(f"**TTM FCF (in thousands):** {ttm_fcf/1e3:,.0f}")
-    st.write(f"**Base FCF for projection:** ${fcf_data[-1]['fcf']:,.0f}")
-
 # 평균 성장률
 col1, col2 = st.columns(2)
 with col1:
@@ -198,11 +192,13 @@ st.subheader("⚙️ DCF Assumptions")
 col1, col2, col3 = st.columns(3)
 
 with col1:
+    # 평균 성장률을 max_value 범위 내로 제한
+    default_growth = min(max(avg_growth * 100, -20.0), 50.0)
     growth_rate = st.number_input(
         "Growth Rate (%)",
         min_value=-20.0,
         max_value=50.0,
-        value=round(avg_growth * 100, 2),
+        value=round(default_growth, 2),
         step=0.5,
         format="%.2f"
     )

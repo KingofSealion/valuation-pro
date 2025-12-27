@@ -12,7 +12,17 @@ from dataclasses import dataclass
 from valuation_utils import (
     calculate_full_wacc,
     validate_terminal_growth,
-    check_reinvestment_feasibility
+    check_reinvestment_feasibility,
+    classify_lifecycle,
+    generate_growth_decay_schedule,
+    generate_margin_convergence_schedule,
+    generate_capex_convergence_schedule,
+    normalize_tax_rate,
+    generate_smart_defaults,
+    get_target_margin,
+    SmartDefaults,
+    LifecycleStage,
+    SECTOR_TARGET_MARGINS
 )
 from data_fetcher import get_risk_free_rate
 
@@ -546,6 +556,209 @@ class WallStreetDCF:
             })
 
         return pd.DataFrame(projections)
+
+    def build_projections_with_convergence(
+        self,
+        growth_schedule: List[float],
+        margin_schedule: List[float],
+        capex_schedule: List[float],
+        tax_schedule: List[float],
+        da_pct: float,
+        nwc_pct: float,
+        wacc: float,
+        terminal_growth: float,
+        exit_multiple: float
+    ) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Context-Aware Projection with Convergence Schedules
+
+        각 연도별로 다른 가정값을 적용하여 보다 현실적인 projection 생성
+
+        Args:
+            growth_schedule: 연도별 성장률 (decay 반영)
+            margin_schedule: 연도별 EBITDA 마진 (수렴 반영)
+            capex_schedule: 연도별 CapEx % (수렴 반영)
+            tax_schedule: 연도별 세율 (정상화 반영)
+            da_pct: D&A % (고정)
+            nwc_pct: NWC % (고정)
+            wacc: 할인율
+            terminal_growth: 영구 성장률
+            exit_multiple: Exit EV/EBITDA 배수
+
+        Returns:
+            (projections DataFrame, valuation dict)
+        """
+        projections = []
+        years = len(growth_schedule)
+
+        base_revenue = self.data.get('revenue', 0)
+        if base_revenue == 0:
+            return pd.DataFrame(), {}
+
+        current_nwc = self.data.get('working_capital', base_revenue * nwc_pct)
+        prev_nwc = current_nwc
+
+        for i in range(years):
+            year = i + 1
+            growth = growth_schedule[i]
+            ebitda_margin = margin_schedule[i] if i < len(margin_schedule) else margin_schedule[-1]
+            capex_pct = capex_schedule[i] if i < len(capex_schedule) else capex_schedule[-1]
+            tax_rate = tax_schedule[i] if i < len(tax_schedule) else tax_schedule[-1]
+
+            if i == 0:
+                revenue = base_revenue * (1 + growth)
+            else:
+                revenue = projections[-1]['revenue'] * (1 + growth)
+
+            ebitda = revenue * ebitda_margin
+            da = revenue * da_pct
+            ebit = ebitda - da
+
+            if ebit > 0:
+                nopat = ebit * (1 - tax_rate)
+            else:
+                nopat = ebit
+
+            capex = revenue * capex_pct
+            nwc = revenue * nwc_pct
+            delta_nwc = nwc - prev_nwc
+            prev_nwc = nwc
+
+            ufcf = nopat + da - capex - delta_nwc
+            discount_period = year - 0.5
+
+            projections.append({
+                'year': year,
+                'discount_period': discount_period,
+                'revenue_growth': growth,
+                'revenue': revenue,
+                'ebitda': ebitda,
+                'ebitda_margin': ebitda_margin,
+                'da': da,
+                'da_pct': da_pct,
+                'ebit': ebit,
+                'tax_rate': tax_rate,
+                'nopat': nopat,
+                'capex': capex,
+                'capex_pct': capex_pct,
+                'delta_nwc': delta_nwc,
+                'ufcf': ufcf,
+                'ufcf_margin': ufcf / revenue if revenue > 0 else 0
+            })
+
+        df = pd.DataFrame(projections)
+
+        # Discount factors
+        df['discount_factor'] = [1 / ((1 + wacc) ** dp) for dp in df['discount_period']]
+        df['pv_ufcf'] = df['ufcf'] * df['discount_factor']
+        sum_pv_fcf = df['pv_ufcf'].sum()
+
+        # Terminal Value calculations
+        final = df.iloc[-1]
+        final_ufcf = final['ufcf']
+        final_ebitda = final['ebitda']
+        final_year = final['year']
+
+        valuation = {}
+
+        # Perpetuity Growth Method
+        spread = wacc - terminal_growth
+        if spread > 0.02:
+            tv_perpetuity = final_ufcf * (1 + terminal_growth) / spread
+            pv_tv_perpetuity = tv_perpetuity / ((1 + wacc) ** final_year)
+            ev_perpetuity = sum_pv_fcf + pv_tv_perpetuity
+
+            valuation['perpetuity'] = {
+                'terminal_value': tv_perpetuity,
+                'pv_terminal_value': pv_tv_perpetuity,
+                'enterprise_value': ev_perpetuity,
+                'tv_pct': pv_tv_perpetuity / ev_perpetuity if ev_perpetuity > 0 else 0,
+                'implied_multiple': tv_perpetuity / final_ebitda if final_ebitda > 0 else 0
+            }
+
+        # Exit Multiple Method
+        if final_ebitda > 0:
+            tv_exit = final_ebitda * exit_multiple
+            pv_tv_exit = tv_exit / ((1 + wacc) ** final_year)
+            ev_exit = sum_pv_fcf + pv_tv_exit
+
+            valuation['exit_multiple'] = {
+                'terminal_value': tv_exit,
+                'pv_terminal_value': pv_tv_exit,
+                'enterprise_value': ev_exit,
+                'tv_pct': pv_tv_exit / ev_exit if ev_exit > 0 else 0,
+                'exit_multiple_used': exit_multiple
+            }
+
+        # Equity Value calculation
+        cash = self.data.get('cash', 0)
+        debt = self.data.get('total_debt', 0)
+        minority_interest = self.data.get('minority_interest', 0)
+        preferred_stock = self.data.get('preferred_stock', 0)
+        shares = self.data.get('shares_outstanding', 0)
+
+        for method in ['perpetuity', 'exit_multiple']:
+            if method in valuation:
+                ev = valuation[method]['enterprise_value']
+                equity = ev - debt - minority_interest - preferred_stock + cash
+                per_share = equity / shares if shares > 0 else 0
+
+                valuation[method]['equity_value'] = equity
+                valuation[method]['per_share_value'] = per_share
+                valuation[method]['cash'] = cash
+                valuation[method]['total_debt'] = debt
+
+        valuation['sum_pv_fcf'] = sum_pv_fcf
+        valuation['current_price'] = self.data.get('current_price', 0)
+
+        return df, valuation
+
+    def get_smart_defaults(self) -> Dict:
+        """
+        Context-Aware Smart Defaults 생성
+
+        Returns:
+            {
+                'lifecycle': LifecycleResult,
+                'projection_years': int,
+                'growth_schedule': list,
+                'margin_schedule': list,
+                'capex_schedule': list,
+                'tax_schedule': list,
+                'terminal_growth': float,
+                'insights': list,
+                'assumptions': dict  # UI용 기본값
+            }
+        """
+        smart = generate_smart_defaults(
+            financial_data=self.data,
+            risk_free_rate=self.risk_free_rate,
+            sector=self.sector
+        )
+
+        # Historical Averages도 포함
+        hist_avg = self.get_historical_averages()
+
+        return {
+            'lifecycle': smart.lifecycle,
+            'projection_years': smart.projection_years,
+            'growth_schedule': smart.growth_schedule,
+            'margin_schedule': smart.margin_schedule,
+            'capex_schedule': smart.capex_schedule,
+            'tax_schedule': smart.tax_schedule,
+            'terminal_growth': smart.terminal_growth,
+            'insights': smart.insights,
+            'assumptions': {
+                'initial_growth': smart.growth_schedule[0] if smart.growth_schedule else 0,
+                'ebitda_margin': hist_avg.get('avg_ebitda_margin', 0.20),
+                'da_pct': hist_avg.get('avg_da_pct', 0.05),
+                'capex_pct': hist_avg.get('avg_capex_pct', 0.05),
+                'nwc_pct': hist_avg.get('avg_nwc_pct', 0.05),
+                'exit_multiple': hist_avg.get('suggested_exit_multiple', 12),
+                'tax_rate': self.data.get('tax_rate', 0.21),
+            },
+            'historical_averages': hist_avg
+        }
     
     def sanity_check(self, projections: pd.DataFrame) -> dict:
         """FCF Sanity Check - 개선된 버전"""

@@ -5,7 +5,8 @@
       "Bash(Get-ChildItem -Path \"d:\\\\valuation_pro\" -Filter \"*.py\" -File)",
       "Bash(Select-Object -ExpandProperty Name)",
       "Bash(uv run python:*)",
-      "Bash(uv run streamlit:*)"
+      "Bash(uv run streamlit:*)",
+      "Bash(python:*)"
     ]
   }
 }

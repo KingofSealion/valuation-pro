@@ -4,9 +4,430 @@ valuation_utils.py - Valuation Calculation Utilities
 - Synthetic Credit Rating
 - Adjusted Beta
 - Terminal Growth Cap
+- Lifecycle Classification
+- Growth Decay & Convergence Logic
 """
 import numpy as np
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
+from dataclasses import dataclass
+from enum import Enum
+
+
+# ==================== Lifecycle Classification ====================
+
+class LifecycleStage(Enum):
+    """회사 성장 단계 분류"""
+    HYPER_GROWTH = "hyper_growth"    # >20% 성장
+    HIGH_GROWTH = "high_growth"       # 10-20% 성장
+    STABLE = "stable"                 # <10% 성장
+
+
+@dataclass
+class LifecycleResult:
+    """Lifecycle 분류 결과"""
+    stage: LifecycleStage
+    revenue_growth: float
+    projection_years: int
+    stage_label: str
+    insight: str
+
+
+def classify_lifecycle(
+    revenue_growth: float,
+    hyper_threshold: float = 0.20,
+    high_threshold: float = 0.10
+) -> LifecycleResult:
+    """
+    회사의 성장 단계를 분류하고 적절한 Projection Period 반환
+
+    Args:
+        revenue_growth: 매출 성장률 (decimal, e.g., 0.25 = 25%)
+        hyper_threshold: Hyper-Growth 기준 (default 20%)
+        high_threshold: High-Growth 기준 (default 10%)
+
+    Returns:
+        LifecycleResult with stage, projection_years, insights
+    """
+    if revenue_growth > hyper_threshold:
+        return LifecycleResult(
+            stage=LifecycleStage.HYPER_GROWTH,
+            revenue_growth=revenue_growth,
+            projection_years=10,
+            stage_label="Hyper-Growth",
+            insight=f"매출 성장률 {revenue_growth*100:.1f}%로 Hyper-Growth 단계입니다. "
+                    f"10년 projection으로 점진적 성장 둔화를 반영합니다."
+        )
+    elif revenue_growth > high_threshold:
+        return LifecycleResult(
+            stage=LifecycleStage.HIGH_GROWTH,
+            revenue_growth=revenue_growth,
+            projection_years=7,
+            stage_label="High-Growth",
+            insight=f"매출 성장률 {revenue_growth*100:.1f}%로 High-Growth 단계입니다. "
+                    f"7년 projection이 적절합니다."
+        )
+    else:
+        return LifecycleResult(
+            stage=LifecycleStage.STABLE,
+            revenue_growth=revenue_growth,
+            projection_years=5,
+            stage_label="Stable",
+            insight=f"매출 성장률 {revenue_growth*100:.1f}%로 Stable 단계입니다. "
+                    f"5년 projection으로 충분합니다."
+        )
+
+
+# ==================== Growth Decay Functions ====================
+
+def generate_growth_decay_schedule(
+    initial_growth: float,
+    terminal_growth: float,
+    years: int,
+    decay_type: str = 'linear'
+) -> List[float]:
+    """
+    성장률 Decay 스케줄 생성 (Risk-Free Rate으로 수렴)
+
+    Args:
+        initial_growth: 첫 해 성장률
+        terminal_growth: 최종 목표 성장률 (typically Risk-Free Rate)
+        years: projection 기간
+        decay_type: 'linear', 'exponential', 'front_loaded'
+
+    Returns:
+        연도별 성장률 리스트
+    """
+    if years <= 1:
+        return [initial_growth]
+
+    # Terminal growth보다는 약간 높게 마무리 (버퍼)
+    final_growth = max(terminal_growth * 1.2, terminal_growth + 0.005)
+
+    if decay_type == 'linear':
+        # 선형 감소: 가장 일반적
+        step = (initial_growth - final_growth) / (years - 1)
+        return [max(initial_growth - (step * i), final_growth) for i in range(years)]
+
+    elif decay_type == 'exponential':
+        # 지수 감소: 초반에 빠르게 감소
+        if initial_growth <= final_growth:
+            return [initial_growth] * years
+        ratio = (final_growth / initial_growth) ** (1 / (years - 1))
+        return [max(initial_growth * (ratio ** i), final_growth) for i in range(years)]
+
+    elif decay_type == 'front_loaded':
+        # 앞쪽 가중: 처음 3년은 빠르게, 이후 완만하게
+        schedule = []
+        fast_decay_years = min(3, years // 2)
+        mid_point = (initial_growth + final_growth) / 2
+
+        # 처음 빠른 구간
+        if fast_decay_years > 1:
+            fast_step = (initial_growth - mid_point) / fast_decay_years
+            for i in range(fast_decay_years):
+                schedule.append(initial_growth - fast_step * i)
+
+        # 나머지 완만한 구간
+        remaining = years - len(schedule)
+        if remaining > 0:
+            slow_step = (mid_point - final_growth) / remaining
+            for i in range(remaining):
+                schedule.append(mid_point - slow_step * i)
+
+        return [max(g, final_growth) for g in schedule[:years]]
+
+    else:
+        return [initial_growth] * years
+
+
+# ==================== Margin Convergence Functions ====================
+
+# 섹터별 Target EBITDA Margin (Mature 기업 기준)
+SECTOR_TARGET_MARGINS = {
+    'Technology': 0.30,
+    'Consumer Cyclical': 0.15,
+    'Communication Services': 0.30,
+    'Healthcare': 0.25,
+    'Financials': 0.35,
+    'Consumer Defensive': 0.18,
+    'Industrials': 0.15,
+    'Energy': 0.25,
+    'Utilities': 0.30,
+    'Real Estate': 0.55,
+    'Materials': 0.18,
+    'Default': 0.20
+}
+
+
+def generate_margin_convergence_schedule(
+    current_margin: float,
+    target_margin: float,
+    years: int,
+    convergence_speed: float = 0.5
+) -> List[float]:
+    """
+    EBITDA Margin 수렴 스케줄 생성
+
+    Args:
+        current_margin: 현재 EBITDA 마진
+        target_margin: 목표 마진 (섹터 평균)
+        years: projection 기간
+        convergence_speed: 수렴 속도 (0.0=변화없음, 1.0=즉시 수렴)
+
+    Returns:
+        연도별 마진 리스트
+
+    Note:
+        Q1 답변에 따라 현재 마진을 우선 사용하고,
+        섹터 평균으로 점진적 수렴
+    """
+    if years <= 1:
+        return [current_margin]
+
+    schedule = []
+    gap = target_margin - current_margin
+
+    for i in range(years):
+        # 연도별로 gap의 일정 비율씩 수렴
+        progress = (i + 1) / years * convergence_speed
+        margin = current_margin + gap * progress
+        schedule.append(margin)
+
+    return schedule
+
+
+def get_target_margin(sector: str, current_margin: float) -> Tuple[float, str]:
+    """
+    목표 마진 결정 (Q1 답변 반영: 회사 Historical 우선)
+
+    Returns:
+        (target_margin, source_description)
+    """
+    sector_target = SECTOR_TARGET_MARGINS.get(sector, SECTOR_TARGET_MARGINS['Default'])
+
+    # 현재 마진이 섹터 평균과 비슷하면 유지
+    if abs(current_margin - sector_target) < 0.05:  # 5%p 이내
+        return current_margin, "현재 마진 유지 (섹터 평균과 유사)"
+
+    # 현재 마진이 높으면 점진적 하락 예상 (경쟁 심화)
+    if current_margin > sector_target + 0.10:  # 10%p 이상 높음
+        target = (current_margin + sector_target) / 2  # 중간값으로 수렴
+        return target, f"고마진 → 섹터 평균({sector_target*100:.0f}%)으로 수렴 예상"
+
+    # 현재 마진이 낮으면 점진적 개선 가정 (운영 효율화)
+    if current_margin < sector_target - 0.10:
+        target = (current_margin + sector_target) / 2
+        return target, f"저마진 → 섹터 평균({sector_target*100:.0f}%)으로 개선 예상"
+
+    return sector_target, f"섹터 평균 ({sector_target*100:.0f}%)"
+
+
+# ==================== CapEx Convergence (Q3: Option B - Gradual) ====================
+
+def generate_capex_convergence_schedule(
+    current_capex_pct: float,
+    current_da_pct: float,
+    years: int,
+    target_capex_ratio: float = 1.05  # CapEx = D&A × 1.05 (Steady State)
+) -> List[float]:
+    """
+    CapEx 수렴 스케줄 생성 (Q3 답변: 점진적 수렴)
+
+    Steady State에서 CapEx ≈ D&A × 105-110%
+    (유지 투자 + 소폭 성장 투자)
+
+    Args:
+        current_capex_pct: 현재 CapEx/Revenue 비율
+        current_da_pct: 현재 D&A/Revenue 비율
+        years: projection 기간
+        target_capex_ratio: 목표 CapEx/D&A 비율 (default 1.05)
+
+    Returns:
+        연도별 CapEx/Revenue 비율 리스트
+    """
+    if years <= 1:
+        return [current_capex_pct]
+
+    # 목표 CapEx = D&A × target_ratio
+    target_capex_pct = current_da_pct * target_capex_ratio
+
+    # 선형 보간 (Linear Interpolation)
+    schedule = []
+    step = (target_capex_pct - current_capex_pct) / (years - 1)
+
+    for i in range(years):
+        capex = current_capex_pct + step * i
+        # 최소/최대 제한
+        capex = max(min(capex, 0.25), 0.02)  # 2% ~ 25%
+        schedule.append(capex)
+
+    return schedule
+
+
+# ==================== Tax Rate Normalization ====================
+
+# 국가별/지역별 법정 법인세율
+STATUTORY_TAX_RATES = {
+    'US': 0.21,
+    'EU': 0.25,  # 평균
+    'UK': 0.25,
+    'JP': 0.30,
+    'KR': 0.25,
+    'CN': 0.25,
+    'Default': 0.21  # US 기준
+}
+
+
+def normalize_tax_rate(
+    current_effective_tax_rate: float,
+    country: str = 'US',
+    years: int = 5
+) -> Tuple[List[float], str]:
+    """
+    실효세율을 법정세율로 정상화 (Tax Shield 소멸 반영)
+
+    Args:
+        current_effective_tax_rate: 현재 실효 세율
+        country: 국가 코드
+        years: projection 기간
+
+    Returns:
+        (연도별 세율 리스트, 설명)
+    """
+    statutory_rate = STATUTORY_TAX_RATES.get(country, STATUTORY_TAX_RATES['Default'])
+
+    # 현재 세율이 법정세율에 가깝거나 높으면 유지
+    if current_effective_tax_rate >= statutory_rate * 0.9:
+        return [current_effective_tax_rate] * years, f"세율 유지 ({current_effective_tax_rate*100:.1f}%)"
+
+    # 현재 세율이 낮으면 점진적 정상화
+    schedule = []
+    step = (statutory_rate - current_effective_tax_rate) / years
+
+    for i in range(years):
+        tax = current_effective_tax_rate + step * (i + 1)
+        schedule.append(min(tax, statutory_rate))
+
+    insight = f"세율 정상화: {current_effective_tax_rate*100:.1f}% → {statutory_rate*100:.1f}%"
+    return schedule, insight
+
+
+# ==================== Smart Defaults Generator ====================
+
+@dataclass
+class SmartDefaults:
+    """Context-Aware Smart Default 값들"""
+    lifecycle: LifecycleResult
+    projection_years: int
+    growth_schedule: List[float]
+    margin_schedule: List[float]
+    capex_schedule: List[float]
+    tax_schedule: List[float]
+    terminal_growth: float
+    insights: List[str]
+
+
+def generate_smart_defaults(
+    financial_data: Dict,
+    risk_free_rate: float,
+    sector: str = 'Default'
+) -> SmartDefaults:
+    """
+    재무 데이터 기반 Smart Default 값 생성
+
+    Args:
+        financial_data: get_stock_data() 결과
+        risk_free_rate: 무위험 이자율
+        sector: 섹터 이름
+
+    Returns:
+        SmartDefaults with all schedules and insights
+    """
+    insights = []
+
+    # 1. Revenue Growth 추출
+    revenue_growth = financial_data.get('revenue_growth', 0) or 0
+    if revenue_growth == 0:
+        # Historical CAGR 사용
+        historical = financial_data.get('historical_financials', [])
+        if len(historical) >= 2:
+            revenues = [h.get('revenue', 0) for h in historical if h.get('revenue', 0) > 0]
+            if len(revenues) >= 2:
+                start, end = revenues[-1], revenues[0]  # 역순
+                n = len(revenues) - 1
+                if start > 0 and end > 0:
+                    revenue_growth = (end / start) ** (1 / n) - 1
+
+    # 2. Lifecycle Classification (Q2 반영)
+    lifecycle = classify_lifecycle(revenue_growth)
+    projection_years = lifecycle.projection_years
+    insights.append(lifecycle.insight)
+
+    # 3. Growth Decay Schedule (Risk-Free Rate으로 수렴)
+    terminal_growth = min(risk_free_rate, 0.03)  # 최대 3%
+    growth_schedule = generate_growth_decay_schedule(
+        initial_growth=revenue_growth,
+        terminal_growth=terminal_growth,
+        years=projection_years,
+        decay_type='linear'
+    )
+    insights.append(f"성장률: {revenue_growth*100:.1f}% → {terminal_growth*100:.1f}% (Risk-Free Rate 수렴)")
+
+    # 4. EBITDA Margin Convergence (Q1 반영: 회사 Historical 우선)
+    current_margin = 0
+    revenue = financial_data.get('revenue', 0)
+    ebitda = financial_data.get('ebitda', 0)
+    if revenue > 0 and ebitda > 0:
+        current_margin = ebitda / revenue
+    else:
+        current_margin = SECTOR_TARGET_MARGINS.get(sector, 0.20)
+
+    target_margin, margin_source = get_target_margin(sector, current_margin)
+    margin_schedule = generate_margin_convergence_schedule(
+        current_margin=current_margin,
+        target_margin=target_margin,
+        years=projection_years,
+        convergence_speed=0.3  # 느린 수렴
+    )
+    insights.append(f"EBITDA 마진: {current_margin*100:.1f}% → {target_margin*100:.1f}% ({margin_source})")
+
+    # 5. CapEx Convergence (Q3 반영: 점진적 수렴)
+    current_capex_pct = 0.05  # Default
+    current_da_pct = 0.05  # Default
+
+    if revenue > 0:
+        operating_cf = financial_data.get('operating_cf', 0)
+        fcf = financial_data.get('fcf', 0)
+        if operating_cf > 0 and fcf > 0:
+            current_capex_pct = (operating_cf - fcf) / revenue
+
+    capex_schedule = generate_capex_convergence_schedule(
+        current_capex_pct=current_capex_pct,
+        current_da_pct=current_da_pct,
+        years=projection_years,
+        target_capex_ratio=1.05
+    )
+    insights.append(f"CapEx: {current_capex_pct*100:.1f}% → D&A × 105% (Steady State 수렴)")
+
+    # 6. Tax Rate Normalization
+    current_tax_rate = financial_data.get('tax_rate', 0.21)
+    tax_schedule, tax_insight = normalize_tax_rate(
+        current_effective_tax_rate=current_tax_rate,
+        country='US',
+        years=projection_years
+    )
+    insights.append(tax_insight)
+
+    return SmartDefaults(
+        lifecycle=lifecycle,
+        projection_years=projection_years,
+        growth_schedule=growth_schedule,
+        margin_schedule=margin_schedule,
+        capex_schedule=capex_schedule,
+        tax_schedule=tax_schedule,
+        terminal_growth=terminal_growth,
+        insights=insights
+    )
 
 
 # ==================== Credit Rating & Spreads ====================

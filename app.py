@@ -166,6 +166,71 @@ with tab1:
 
     fcf_data = all_fcf_data[-selected_years:]
 
+    # DCF 모델 초기화 (성장률 계산에 필요)
+    dcf_model = WallStreetDCF(data)
+
+    # ===== Smart Defaults & Lifecycle Classification =====
+    smart_defaults = dcf_model.get_smart_defaults()
+    lifecycle = smart_defaults['lifecycle']
+
+    # Lifecycle 표시 (Insight Card)
+    lifecycle_colors = {
+        'Hyper-Growth': ('#ef4444', '#fef2f2'),  # 빨강
+        'High-Growth': ('#f59e0b', '#fffbeb'),   # 노랑
+        'Stable': ('#10b981', '#ecfdf5')          # 초록
+    }
+    lc_color, lc_bg = lifecycle_colors.get(lifecycle.stage_label, ('#6b7280', '#f9fafb'))
+
+    st.markdown(f"""
+    <div style="background: {lc_bg}; padding: 16px 20px; border-radius: 10px;
+                border-left: 5px solid {lc_color}; margin: 10px 0;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <span style="font-size: 0.85rem; color: #666;">Company Stage</span>
+                <h3 style="margin: 5px 0; color: {lc_color};">{lifecycle.stage_label}</h3>
+            </div>
+            <div style="text-align: right;">
+                <span style="font-size: 2rem; font-weight: bold; color: {lc_color};">
+                    {lifecycle.projection_years}Y
+                </span>
+                <br><span style="font-size: 0.75rem; color: #888;">Projection Period</span>
+            </div>
+        </div>
+        <p style="font-size: 0.85rem; color: #555; margin-top: 10px; margin-bottom: 0;">
+            {lifecycle.insight}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Smart Insights Expander
+    with st.expander("💡 Smart Default Insights", expanded=False):
+        for insight in smart_defaults['insights']:
+            st.markdown(f"• {insight}")
+
+        st.markdown("---")
+        st.markdown("**Convergence Schedules (연도별 수렴)**")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            # Growth Schedule
+            growth_sch = smart_defaults['growth_schedule']
+            growth_df = pd.DataFrame({
+                'Year': [f"Y{i+1}" for i in range(len(growth_sch))],
+                'Growth': [f"{g*100:.1f}%" for g in growth_sch]
+            })
+            st.markdown("**Growth Decay**")
+            st.dataframe(growth_df.T, use_container_width=True)
+        with col_b:
+            # CapEx Schedule
+            capex_sch = smart_defaults['capex_schedule']
+            capex_df = pd.DataFrame({
+                'Year': [f"Y{i+1}" for i in range(len(capex_sch))],
+                'CapEx%': [f"{c*100:.1f}%" for c in capex_sch]
+            })
+            st.markdown("**CapEx Convergence**")
+            st.dataframe(capex_df.T, use_container_width=True)
+
+    st.divider()
+
     # 성장률 계산
     growth_rates = []
     for i in range(1, len(fcf_data)):
@@ -178,7 +243,23 @@ with tab1:
         else:
             fcf_data[i]['growth'] = None
 
-    avg_growth = np.mean(growth_rates) if growth_rates else 0.10
+    # 1. Historical FCF CAGR (복합성장률 - 단순평균보다 안정적)
+    first_fcf = fcf_data[0]['fcf']
+    last_fcf = fcf_data[-1]['fcf']
+    n_years = len(fcf_data) - 1
+    if first_fcf > 0 and last_fcf > 0 and n_years > 0:
+        historical_fcf_cagr = (last_fcf / first_fcf) ** (1 / n_years) - 1
+    else:
+        historical_fcf_cagr = np.mean(growth_rates) if growth_rates else 0.10
+
+    # 2. Revenue Growth (TTM - DCF에 적합)
+    revenue_growth = data.get('revenue_growth', 0) or 0
+
+    # 3. Historical Revenue CAGR (WallStreetDCF에서 계산)
+    hist_avgs = dcf_model.get_historical_averages()
+    revenue_cagr = hist_avgs.get('blended_growth', revenue_growth)
+
+    avg_growth = historical_fcf_cagr  # 기본값
 
     # FCF 테이블
     table_data = {'': ['Year', 'FCF (in thousands)', 'Growth']}
@@ -206,33 +287,38 @@ with tab1:
     # ===== DCF 가정값 =====
     st.subheader("⚙️ DCF Assumptions")
 
-    dcf_model = WallStreetDCF(data)
     wacc_result = dcf_model.calculate_auto_wacc()
     auto_wacc = wacc_result['wacc'] * 100
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        historical_cagr = avg_growth * 100
-        analyst_growth = (data.get('earnings_growth', 0) or 0) * 100
+        # 성장률 옵션들 (DCF에 적합한 지표들)
+        fcf_cagr_pct = historical_fcf_cagr * 100
+        revenue_ttm_pct = revenue_growth * 100
+        revenue_cagr_pct = revenue_cagr * 100
+        smart_growth_pct = smart_defaults['assumptions']['initial_growth'] * 100
 
         growth_source = st.radio(
             "Growth Rate Source",
-            options=["Historical FCF CAGR", "Analyst Est. (EPS)", "Manual"],
+            options=["Smart Default", "FCF CAGR", "Revenue Growth", "Revenue CAGR", "Manual"],
             index=0,
             horizontal=True,
             key="growth_source"
         )
 
-        if growth_source == "Historical FCF CAGR":
-            default_growth = historical_cagr
-            st.caption(f"📊 Past FCF CAGR: {historical_cagr:.1f}%")
-        elif growth_source == "Analyst Est. (EPS)":
-            default_growth = analyst_growth if analyst_growth else historical_cagr
-            if analyst_growth:
-                st.caption(f"📊 Forward EPS Growth: {analyst_growth:.1f}%")
-            else:
-                st.warning("⚠️ Analyst data unavailable")
+        if growth_source == "Smart Default":
+            default_growth = smart_growth_pct
+            st.caption(f"🤖 Context-Aware: {smart_growth_pct:.1f}% (Lifecycle-based decay 적용)")
+        elif growth_source == "FCF CAGR":
+            default_growth = fcf_cagr_pct
+            st.caption(f"📊 Historical FCF CAGR: {fcf_cagr_pct:.1f}%")
+        elif growth_source == "Revenue Growth":
+            default_growth = revenue_ttm_pct
+            st.caption(f"📊 TTM Revenue Growth: {revenue_ttm_pct:.1f}%")
+        elif growth_source == "Revenue CAGR":
+            default_growth = revenue_cagr_pct
+            st.caption(f"📊 3Y Revenue CAGR: {revenue_cagr_pct:.1f}%")
         else:
             default_growth = 10.0
             st.caption("✏️ Enter your estimate")
@@ -255,12 +341,13 @@ with tab1:
             st.warning(f"⚠️ High Growth ({growth_rate:.1f}%)")
 
         # Growth Rate 가이드라인
-        analyst_str = f"• Analyst Est.: {analyst_growth:.1f}%<br>" if analyst_growth else ""
         st.markdown(f"""
         <div class="guide-text">
-        💡 <b>Guideline:</b><br>
-        • Historical CAGR: {historical_cagr:.1f}%<br>
-        {analyst_str}• 고성장주: 15~30%
+        💡 <b>Available Data:</b><br>
+        • 🤖 Smart Default: {smart_growth_pct:.1f}%<br>
+        • FCF CAGR: {fcf_cagr_pct:.1f}%<br>
+        • Revenue TTM: {revenue_ttm_pct:.1f}%<br>
+        • Revenue CAGR: {revenue_cagr_pct:.1f}%
         </div>
         """, unsafe_allow_html=True)
 
@@ -349,7 +436,8 @@ with tab1:
         shares = data.get('shares_outstanding', 1)
         cash = data.get('cash', 0)
         debt = data.get('total_debt', 0)
-        proj_years = 10
+        # Lifecycle 기반 projection 기간 사용
+        proj_years = lifecycle.projection_years if growth_source == "Smart Default" else 10
 
         if current_price <= 0 or base_fcf <= 0 or wacc_val <= tgr_val:
             return None
@@ -357,9 +445,17 @@ with tab1:
         low, high = -0.5, 2.0
         for _ in range(50):
             mid = (low + high) / 2
-            pv_sum = sum(base_fcf * ((1 + mid) ** (i + 1)) / ((1 + wacc_val) ** (i + 1)) for i in range(proj_years))
-            final_fcf = base_fcf * ((1 + mid) ** proj_years)
-            tv = final_fcf * (1 + tgr_val) / (wacc_val - tgr_val)
+            pv_sum = 0
+            prev_fcf = base_fcf
+            for i in range(proj_years):
+                if i == 0:
+                    fcf_i = base_fcf * (1 + mid)
+                else:
+                    fcf_i = prev_fcf * (1 + mid)
+                prev_fcf = fcf_i
+                pv_sum += fcf_i / ((1 + wacc_val) ** (i + 1))
+
+            tv = prev_fcf * (1 + tgr_val) / (wacc_val - tgr_val)
             pv_tv = tv / ((1 + wacc_val) ** proj_years)
             equity_val = pv_sum + pv_tv + cash - debt
             fair_price = equity_val / shares if shares > 0 else 0
@@ -405,32 +501,87 @@ with tab1:
 
     st.divider()
 
-    # DCF 계산
-    st.subheader("📊 Future FCF Projections (10 Years)")
-
-    projection_years = 10
+    # DCF 계산 - Lifecycle 기반 Projection Period
+    projection_years = lifecycle.projection_years if growth_source == "Smart Default" else 10
+    st.subheader(f"📊 Future FCF Projections ({projection_years} Years)")
 
     if base_fcf <= 0:
         st.error("⚠️ Base FCF가 0 이하입니다.")
         st.stop()
 
     projections = []
+    # Smart Default 모드: Growth Decay Schedule 사용
+    use_decay_schedule = (growth_source == "Smart Default")
+    growth_schedule = smart_defaults['growth_schedule'] if use_decay_schedule else None
+
     for i in range(projection_years):
         year = base_year + i + 1
-        fcf = base_fcf * ((1 + growth_dec) ** (i + 1))
+
+        if use_decay_schedule and i < len(growth_schedule):
+            # 연도별 다른 성장률 적용
+            year_growth = growth_schedule[i]
+        else:
+            year_growth = growth_dec
+
+        if i == 0:
+            fcf = base_fcf * (1 + year_growth)
+        else:
+            fcf = projections[-1]['fcf'] * (1 + year_growth)
+
         pv = fcf / ((1 + disc_dec) ** (i + 1))
-        projections.append({'year': year, 'fcf': fcf, 'pv': pv})
+        projections.append({'year': year, 'fcf': fcf, 'pv': pv, 'growth': year_growth})
 
     final_fcf = projections[-1]['fcf']
     tv = final_fcf * (1 + perp_dec) / (disc_dec - perp_dec)
     pv_tv = tv / ((1 + disc_dec) ** projection_years)
 
-    proj_table = {'': ['Year', 'Future FCF', 'PV of FCF']}
-    for i, p in enumerate(projections):
-        proj_table[str(i+1)] = [str(p['year']), f"${p['fcf']/1e6:,.0f}M", f"${p['pv']/1e6:,.0f}M"]
-    proj_table['TV'] = ['Terminal Value', f"${tv/1e6:,.0f}M", f"${pv_tv/1e6:,.0f}M"]
+    # Smart Default 모드에서는 연도별 성장률도 표시
+    if use_decay_schedule:
+        proj_table = {'': ['Year', 'Growth', 'Future FCF', 'PV of FCF']}
+        for i, p in enumerate(projections):
+            proj_table[str(i+1)] = [
+                str(p['year']),
+                f"{p['growth']*100:.1f}%",
+                f"${p['fcf']/1e6:,.0f}M",
+                f"${p['pv']/1e6:,.0f}M"
+            ]
+        proj_table['TV'] = ['Terminal', f"{perp_dec*100:.1f}%", f"${tv/1e6:,.0f}M", f"${pv_tv/1e6:,.0f}M"]
+    else:
+        proj_table = {'': ['Year', 'Future FCF', 'PV of FCF']}
+        for i, p in enumerate(projections):
+            proj_table[str(i+1)] = [str(p['year']), f"${p['fcf']/1e6:,.0f}M", f"${p['pv']/1e6:,.0f}M"]
+        proj_table['TV'] = ['Terminal Value', f"${tv/1e6:,.0f}M", f"${pv_tv/1e6:,.0f}M"]
 
     st.dataframe(pd.DataFrame(proj_table).set_index('').T, use_container_width=True)
+
+    # Smart Default 모드일 때 Growth Decay 시각화
+    if use_decay_schedule:
+        with st.expander("📉 Growth Decay Visualization", expanded=False):
+            years = [f"Y{i+1}" for i in range(len(growth_schedule))]
+            growth_pcts = [g * 100 for g in growth_schedule]
+
+            fig_decay = go.Figure()
+            fig_decay.add_trace(go.Scatter(
+                x=years, y=growth_pcts,
+                mode='lines+markers',
+                name='Growth Rate',
+                line=dict(color='#667eea', width=3),
+                marker=dict(size=8)
+            ))
+            fig_decay.add_hline(
+                y=perp_dec * 100,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"Terminal Growth: {perp_dec*100:.1f}%"
+            )
+            fig_decay.update_layout(
+                title="Growth Rate Decay to Terminal Growth",
+                xaxis_title="Year",
+                yaxis_title="Growth Rate (%)",
+                height=250,
+                margin=dict(t=40, b=40)
+            )
+            st.plotly_chart(fig_decay, use_container_width=True)
 
     # 결과 계산
     sum_pv_fcf = sum(p['pv'] for p in projections)
@@ -505,21 +656,31 @@ with tab1:
     wacc_range = [max(w, 0.03) for w in wacc_range]
     growth_range = [max(g, 0.0) for g in growth_range]
 
-    def calc_dcf_value_full(wacc_val, tgr_val, fcf_growth_val):
+    def calc_dcf_value_full(wacc_val, tgr_val, fcf_growth_val, use_schedule=False, schedule=None):
         """주어진 WACC, Terminal Growth, FCF Growth로 DCF 가치 계산"""
         if wacc_val <= tgr_val:
             return None
 
         # FCF 프로젝션 PV
         pv_sum = 0
+        prev_fcf = base_fcf
         for i in range(projection_years):
-            fcf_i = base_fcf * ((1 + fcf_growth_val) ** (i + 1))
+            if use_schedule and schedule and i < len(schedule):
+                g = schedule[i]
+            else:
+                g = fcf_growth_val
+
+            if i == 0:
+                fcf_i = base_fcf * (1 + g)
+            else:
+                fcf_i = prev_fcf * (1 + g)
+            prev_fcf = fcf_i
+
             pv_i = fcf_i / ((1 + wacc_val) ** (i + 1))
             pv_sum += pv_i
 
         # Terminal Value
-        final_fcf_calc = base_fcf * ((1 + fcf_growth_val) ** projection_years)
-        tv_calc = final_fcf_calc * (1 + tgr_val) / (wacc_val - tgr_val)
+        tv_calc = prev_fcf * (1 + tgr_val) / (wacc_val - tgr_val)
         pv_tv_calc = tv_calc / ((1 + wacc_val) ** projection_years)
 
         # Equity Value
@@ -529,8 +690,8 @@ with tab1:
         return price_calc
 
     def calc_dcf_value(wacc_val, tgr_val):
-        """기존 FCF Growth 사용"""
-        return calc_dcf_value_full(wacc_val, tgr_val, growth_dec)
+        """Smart Default 모드면 schedule 사용"""
+        return calc_dcf_value_full(wacc_val, tgr_val, growth_dec, use_decay_schedule, growth_schedule)
 
     # Heatmap 데이터 생성
     z_values = []
@@ -648,6 +809,21 @@ with tab2:
             # Peer Comparison Table
             st.subheader("📊 Valuation Multiples Comparison")
 
+            # EPS Growth 계산 (Forward EPS / Trailing EPS - 1)
+            trailing_eps = data.get('eps', 0)
+            forward_eps = data.get('forward_eps', 0)
+            if trailing_eps > 0 and forward_eps > 0:
+                target_eps_growth = (forward_eps - trailing_eps) / trailing_eps
+            else:
+                target_eps_growth = data.get('earnings_growth', 0) or 0
+
+            # PEG Ratio 계산 (P/E / EPS Growth%)
+            target_pe = data.get('pe_ratio', 0)
+            if target_pe > 0 and target_eps_growth > 0:
+                target_peg = target_pe / (target_eps_growth * 100)
+            else:
+                target_peg = 0
+
             # 타겟 기업 데이터 추가
             target_row = {
                 'ticker': f"**{ticker}**",
@@ -656,28 +832,47 @@ with tab2:
                 'market_cap': data.get('market_cap', 0),
                 'pe_ratio': data.get('pe_ratio', 0),
                 'forward_pe': data.get('forward_pe', 0),
+                'eps_growth': target_eps_growth,
+                'peg_ratio': target_peg,
                 'pb_ratio': data.get('pb_ratio', 0),
                 'ev_ebitda': data.get('ev_ebitda', 0),
-                'revenue_growth': data.get('revenue_growth', 0),
-                'profit_margin': data.get('profit_margin', 0),
             }
+
+            # Peer 데이터에 EPS Growth, PEG 추가
+            for p in peer_data:
+                p_trailing = p.get('eps', 0)
+                p_forward = p.get('forward_eps', 0)
+                if p_trailing > 0 and p_forward > 0:
+                    p['eps_growth'] = (p_forward - p_trailing) / p_trailing
+                else:
+                    p['eps_growth'] = p.get('earnings_growth', 0) or 0
+
+                p_pe = p.get('pe_ratio', 0)
+                if p_pe > 0 and p.get('eps_growth', 0) > 0:
+                    p['peg_ratio'] = p_pe / (p['eps_growth'] * 100)
+                else:
+                    p['peg_ratio'] = 0
 
             all_data = [target_row] + peer_data
 
             # DataFrame 생성
             df = pd.DataFrame(all_data)
-            display_df = df[['ticker', 'name', 'price', 'market_cap', 'pe_ratio', 'forward_pe', 'pb_ratio', 'ev_ebitda']].copy()
-            display_df.columns = ['Ticker', 'Company', 'Price', 'Market Cap', 'P/E', 'Fwd P/E', 'P/B', 'EV/EBITDA']
+            display_df = df[['ticker', 'name', 'price', 'market_cap', 'pe_ratio', 'forward_pe', 'eps_growth', 'peg_ratio', 'ev_ebitda']].copy()
+            display_df.columns = ['Ticker', 'Company', 'Price', 'Market Cap', 'P/E', 'Fwd P/E', 'EPS Gr', 'PEG', 'EV/EBITDA']
 
             # 포맷팅
             display_df['Price'] = display_df['Price'].apply(lambda x: f"${x:.2f}" if x > 0 else "-")
             display_df['Market Cap'] = display_df['Market Cap'].apply(lambda x: f"${x/1e9:.1f}B" if x > 0 else "-")
             display_df['P/E'] = display_df['P/E'].apply(lambda x: f"{x:.1f}x" if x > 0 else "-")
             display_df['Fwd P/E'] = display_df['Fwd P/E'].apply(lambda x: f"{x:.1f}x" if x > 0 else "-")
-            display_df['P/B'] = display_df['P/B'].apply(lambda x: f"{x:.1f}x" if x > 0 else "-")
+            display_df['EPS Gr'] = display_df['EPS Gr'].apply(lambda x: f"{x*100:.1f}%" if x != 0 else "-")
+            display_df['PEG'] = display_df['PEG'].apply(lambda x: f"{x:.2f}" if x > 0 else "-")
             display_df['EV/EBITDA'] = display_df['EV/EBITDA'].apply(lambda x: f"{x:.1f}x" if x > 0 else "-")
 
             st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+            # PEG Ratio 가이드
+            st.caption("💡 **PEG Ratio**: P/E ÷ EPS Growth%. PEG < 1 = 저평가, PEG > 2 = 고평가 (일반적 기준)")
 
             st.divider()
 
@@ -687,23 +882,33 @@ with tab2:
             relative = calculate_peer_relative_valuation(data, peer_data)
 
             if 'error' not in relative:
+                # Peer 평균 PEG 계산
+                peer_pegs = [p.get('peg_ratio', 0) for p in peer_data if p.get('peg_ratio', 0) > 0]
+                avg_peg = sum(peer_pegs) / len(peer_pegs) if peer_pegs else 0
+
+                # Peer 평균 EPS Growth 계산
+                peer_eps_growths = [p.get('eps_growth', 0) for p in peer_data if p.get('eps_growth', 0) > 0]
+                avg_eps_growth = sum(peer_eps_growths) / len(peer_eps_growths) if peer_eps_growths else 0
+
                 col1, col2 = st.columns(2)
 
                 with col1:
                     st.markdown("**Peer Average Multiples**")
                     avg = relative['peer_avg']
                     avg_df = pd.DataFrame({
-                        'Multiple': ['P/E', 'Forward P/E', 'P/B', 'EV/EBITDA'],
+                        'Multiple': ['P/E', 'Forward P/E', 'EPS Growth', 'PEG Ratio', 'EV/EBITDA'],
                         'Peer Avg': [
                             f"{avg['pe']:.1f}x" if avg['pe'] > 0 else "-",
                             f"{avg['forward_pe']:.1f}x" if avg['forward_pe'] > 0 else "-",
-                            f"{avg['pb']:.1f}x" if avg['pb'] > 0 else "-",
+                            f"{avg_eps_growth*100:.1f}%" if avg_eps_growth > 0 else "-",
+                            f"{avg_peg:.2f}" if avg_peg > 0 else "-",
                             f"{avg['ev_ebitda']:.1f}x" if avg['ev_ebitda'] > 0 else "-"
                         ],
                         f'{ticker}': [
                             f"{data.get('pe_ratio', 0):.1f}x" if data.get('pe_ratio', 0) > 0 else "-",
                             f"{data.get('forward_pe', 0):.1f}x" if data.get('forward_pe', 0) > 0 else "-",
-                            f"{data.get('pb_ratio', 0):.1f}x" if data.get('pb_ratio', 0) > 0 else "-",
+                            f"{target_eps_growth*100:.1f}%" if target_eps_growth > 0 else "-",
+                            f"{target_peg:.2f}" if target_peg > 0 else "-",
                             f"{data.get('ev_ebitda', 0):.1f}x" if data.get('ev_ebitda', 0) > 0 else "-"
                         ]
                     })
@@ -714,14 +919,23 @@ with tab2:
                     implied = relative['implied_values']
                     premium = relative['premium_discount']
 
+                    # PEG 기반 적정가 계산 (Peer Avg PEG × Target EPS Growth × Target EPS)
+                    peg_implied = 0
+                    if avg_peg > 0 and target_eps_growth > 0 and trailing_eps > 0:
+                        # Fair P/E = Avg PEG × EPS Growth%
+                        fair_pe = avg_peg * (target_eps_growth * 100)
+                        peg_implied = fair_pe * trailing_eps
+
                     implied_df = pd.DataFrame({
-                        'Method': ['P/E Based', 'P/B Based'],
+                        'Method': ['P/E Based', 'PEG Based', 'P/B Based'],
                         'Implied Price': [
                             f"${implied.get('pe_based', 0):.2f}" if implied.get('pe_based', 0) > 0 else "-",
+                            f"${peg_implied:.2f}" if peg_implied > 0 else "-",
                             f"${implied.get('pb_based', 0):.2f}" if implied.get('pb_based', 0) > 0 else "-"
                         ],
                         'vs Current': [
                             f"{((implied.get('pe_based', 0) / current_price - 1) * 100):+.1f}%" if implied.get('pe_based', 0) > 0 and current_price > 0 else "-",
+                            f"{((peg_implied / current_price - 1) * 100):+.1f}%" if peg_implied > 0 and current_price > 0 else "-",
                             f"{((implied.get('pb_based', 0) / current_price - 1) * 100):+.1f}%" if implied.get('pb_based', 0) > 0 and current_price > 0 else "-"
                         ]
                     })
@@ -731,18 +945,22 @@ with tab2:
                 st.divider()
                 st.markdown("**Premium / Discount vs Peers**")
 
-                prem_cols = st.columns(3)
+                prem_cols = st.columns(4)
                 if 'pe' in premium:
                     with prem_cols[0]:
                         pe_prem = premium['pe']
-                        color_class = "premium" if pe_prem > 0 else "discount"
                         st.metric("P/E", f"{pe_prem:+.1f}%", delta=None)
-                if 'pb' in premium:
+                # PEG 프리미엄/디스카운트
+                if target_peg > 0 and avg_peg > 0:
                     with prem_cols[1]:
+                        peg_prem = (target_peg / avg_peg - 1) * 100
+                        st.metric("PEG", f"{peg_prem:+.1f}%", delta=None)
+                if 'pb' in premium:
+                    with prem_cols[2]:
                         pb_prem = premium['pb']
                         st.metric("P/B", f"{pb_prem:+.1f}%", delta=None)
                 if 'ev_ebitda' in premium:
-                    with prem_cols[2]:
+                    with prem_cols[3]:
                         ev_prem = premium['ev_ebitda']
                         st.metric("EV/EBITDA", f"{ev_prem:+.1f}%", delta=None)
 

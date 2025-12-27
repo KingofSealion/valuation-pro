@@ -37,6 +37,74 @@ def calculate_ttm_fcf(stock) -> float:
         return stock.info.get('freeCashflow', 0) or 0
 
 
+def get_minority_interest(balance_sheet) -> float:
+    """
+    소수지분(Minority Interest) 추출
+
+    EV에서 Equity로 변환 시 차감해야 하는 항목
+
+    Returns:
+        양수 값
+    """
+    try:
+        if balance_sheet is None or balance_sheet.empty:
+            return 0
+
+        latest_col = balance_sheet.columns[0]
+
+        # 가능한 행 이름들
+        possible_names = [
+            'Minority Interest',
+            'MinorityInterest',
+            'Non Controlling Interest',
+            'Noncontrolling Interest'
+        ]
+
+        for name in possible_names:
+            if name in balance_sheet.index:
+                val = balance_sheet.loc[name, latest_col]
+                if pd.notna(val):
+                    return abs(float(val))
+
+        return 0
+    except Exception:
+        return 0
+
+
+def get_preferred_stock(balance_sheet) -> float:
+    """
+    우선주(Preferred Stock) 추출
+
+    EV에서 Equity로 변환 시 차감해야 하는 항목
+
+    Returns:
+        양수 값
+    """
+    try:
+        if balance_sheet is None or balance_sheet.empty:
+            return 0
+
+        latest_col = balance_sheet.columns[0]
+
+        # 가능한 행 이름들
+        possible_names = [
+            'Preferred Stock',
+            'PreferredStock',
+            'Preferred Securities',
+            'Redeemable Preferred Stock'
+        ]
+
+        for name in possible_names:
+            if name in balance_sheet.index:
+                val = balance_sheet.loc[name, latest_col]
+                if pd.notna(val):
+                    return abs(float(val))
+
+        return 0
+    except Exception:
+        return 0
+
+
 def get_interest_expense(stock) -> float:
     """
     이자비용(Interest Expense) 추출
@@ -222,6 +290,10 @@ def get_stock_data(ticker: str) -> tuple:
             'cash': info.get('totalCash', 0),
             'current_assets': info.get('totalCurrentAssets', 0),
             'current_liabilities': info.get('totalCurrentLiabilities', 0),
+
+            # EV → Equity 변환용 (Minority Interest, Preferred Stock)
+            'minority_interest': get_minority_interest(balance_sheet),
+            'preferred_stock': get_preferred_stock(balance_sheet),
             
             # 현금흐름 (TTM은 quarterly 데이터로 계산)
             'operating_cf': info.get('operatingCashflow', 0),
@@ -438,6 +510,19 @@ def get_peer_group_data(peer_tickers: list, max_workers: int = 5) -> list:
             if not info or info.get('regularMarketPrice') is None:
                 return {'ticker': ticker, 'error': True, 'error_msg': 'No data'}
 
+            # EPS Growth 계산 (Forward EPS - Trailing EPS)
+            trailing_eps = info.get('trailingEps', 0) or 0
+            forward_eps = info.get('forwardEps', 0) or 0
+            eps_growth = 0
+            if trailing_eps > 0 and forward_eps > 0:
+                eps_growth = (forward_eps - trailing_eps) / trailing_eps
+
+            # PEG Ratio 계산
+            pe_ratio = info.get('trailingPE', 0) or 0
+            peg_ratio = 0
+            if pe_ratio > 0 and eps_growth > 0:
+                peg_ratio = pe_ratio / (eps_growth * 100)
+
             return {
                 'ticker': ticker.upper(),
                 'name': info.get('shortName', ticker),
@@ -445,12 +530,18 @@ def get_peer_group_data(peer_tickers: list, max_workers: int = 5) -> list:
                 'market_cap': info.get('marketCap', 0),
 
                 # Valuation Multiples
-                'pe_ratio': info.get('trailingPE', 0) or 0,
+                'pe_ratio': pe_ratio,
                 'forward_pe': info.get('forwardPE', 0) or 0,
                 'pb_ratio': info.get('priceToBook', 0) or 0,
                 'ps_ratio': info.get('priceToSalesTrailing12Months', 0) or 0,
                 'ev_ebitda': info.get('enterpriseToEbitda', 0) or 0,
                 'ev_revenue': info.get('enterpriseToRevenue', 0) or 0,
+
+                # EPS & PEG (Relative Valuation용)
+                'eps': trailing_eps,
+                'forward_eps': forward_eps,
+                'eps_growth': eps_growth,
+                'peg_ratio': peg_ratio,
 
                 # Growth & Margins
                 'revenue_growth': info.get('revenueGrowth', 0) or 0,

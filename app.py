@@ -13,10 +13,19 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from data_fetcher import (
-    get_stock_data, get_peers,
-    get_peer_group_data, calculate_peer_relative_valuation
+    get_stock_data as _get_stock_data, get_peers,
+    get_peer_group_data as _get_peer_group_data, calculate_peer_relative_valuation
 )
 from dcf_model import WallStreetDCF
+
+# Caching으로 Rate Limit 방지 (10분간 캐시)
+@st.cache_data(ttl=600, show_spinner=False)
+def get_stock_data(ticker: str):
+    return _get_stock_data(ticker)
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_peer_group_data(peer_tickers: tuple):
+    return _get_peer_group_data(list(peer_tickers))
 
 st.set_page_config(page_title="Stock Valuation Pro", page_icon="📊", layout="wide")
 
@@ -626,7 +635,7 @@ with tab2:
     if fetch_peers or 'peer_data' in st.session_state:
         if fetch_peers:
             with st.spinner(f"Fetching {len(peer_tickers)} peers..."):
-                peer_data = get_peer_group_data(peer_tickers)
+                peer_data = get_peer_group_data(tuple(peer_tickers))
                 st.session_state['peer_data'] = peer_data
         else:
             peer_data = st.session_state['peer_data']

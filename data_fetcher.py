@@ -37,20 +37,147 @@ def calculate_ttm_fcf(stock) -> float:
         return stock.info.get('freeCashflow', 0) or 0
 
 
+def get_interest_expense(stock) -> float:
+    """
+    이자비용(Interest Expense) 추출
+
+    Returns:
+        양수 값 (실제 비용)
+    """
+    try:
+        income_stmt = stock.income_stmt
+        if income_stmt is None or income_stmt.empty:
+            return 0
+
+        # TTM (가장 최근 컬럼)
+        latest_col = income_stmt.columns[0]
+
+        # 방법 1: Interest Expense 행
+        if 'Interest Expense' in income_stmt.index:
+            val = income_stmt.loc['Interest Expense', latest_col]
+            if pd.notna(val):
+                return abs(float(val))  # 양수로 변환
+
+        # 방법 2: Interest Expense Non Operating (일부 기업)
+        if 'Interest Expense Non Operating' in income_stmt.index:
+            val = income_stmt.loc['Interest Expense Non Operating', latest_col]
+            if pd.notna(val):
+                return abs(float(val))
+
+        # 방법 3: Net Interest Income (금융기관의 경우 음수)
+        if 'Net Interest Income' in income_stmt.index:
+            val = income_stmt.loc['Net Interest Income', latest_col]
+            if pd.notna(val) and val < 0:
+                return abs(float(val))
+
+        return 0
+    except Exception:
+        return 0
+
+
+def get_ebit(stock, info: dict) -> float:
+    """
+    EBIT (Operating Income) 추출
+
+    Method 1: Income Statement에서 직접 추출
+    Method 2: Revenue * Operating Margin
+    Method 3: EBITDA * 0.8 (추정)
+
+    Returns:
+        EBIT 값 (양수)
+    """
+    try:
+        income_stmt = stock.income_stmt
+        if income_stmt is not None and not income_stmt.empty:
+            latest_col = income_stmt.columns[0]
+
+            # Method 1: Operating Income 행
+            if 'Operating Income' in income_stmt.index:
+                val = income_stmt.loc['Operating Income', latest_col]
+                if pd.notna(val) and val > 0:
+                    return float(val)
+
+            # EBIT 행
+            if 'EBIT' in income_stmt.index:
+                val = income_stmt.loc['EBIT', latest_col]
+                if pd.notna(val) and val > 0:
+                    return float(val)
+
+        # Method 2: Revenue * Operating Margin
+        revenue = info.get('totalRevenue', 0)
+        op_margin = info.get('operatingMargins', 0)
+        if revenue > 0 and op_margin > 0:
+            return revenue * op_margin
+
+        # Method 3: EBITDA * 0.8 (보수적 추정)
+        ebitda = info.get('ebitda', 0)
+        if ebitda > 0:
+            return ebitda * 0.80
+
+        return 0
+    except Exception:
+        return 0
+
+
+def get_tax_rate(stock, info: dict) -> float:
+    """
+    실효 세율(Effective Tax Rate) 계산
+
+    Method 1: Tax Provision / Pretax Income
+    Method 2: 법인세율 (default 21%)
+
+    Returns:
+        세율 (0.0 ~ 1.0)
+    """
+    try:
+        income_stmt = stock.income_stmt
+        if income_stmt is None or income_stmt.empty:
+            return 0.21  # Default US corporate tax rate
+
+        latest_col = income_stmt.columns[0]
+
+        # Tax Provision 추출
+        tax_provision = 0
+        if 'Tax Provision' in income_stmt.index:
+            val = income_stmt.loc['Tax Provision', latest_col]
+            if pd.notna(val):
+                tax_provision = float(val)
+
+        # Pretax Income 추출
+        pretax_income = 0
+        if 'Pretax Income' in income_stmt.index:
+            val = income_stmt.loc['Pretax Income', latest_col]
+            if pd.notna(val):
+                pretax_income = float(val)
+
+        # 실효 세율 계산
+        if pretax_income > 0 and tax_provision > 0:
+            effective_rate = tax_provision / pretax_income
+
+            # Sanity check: 0% ~ 40% 범위
+            if 0 <= effective_rate <= 0.40:
+                return effective_rate
+
+        # Fallback: 법인세율
+        return 0.21
+    except Exception:
+        return 0.21
+
+
 def get_stock_data(ticker: str) -> tuple:
     """
     미국 주식 종합 데이터 수집
-    
+
     Returns:
         (data_dict, success_bool)
     """
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        
+
         if not info or info.get('regularMarketPrice') is None:
             return {'error': f'No data found for {ticker}'}, False
-        
+
         # 재무제표 가져오기
         income_stmt = stock.income_stmt
         balance_sheet = stock.balance_sheet
@@ -78,9 +205,14 @@ def get_stock_data(ticker: str) -> tuple:
             'gross_profit': info.get('grossProfits', 0),
             'operating_income': info.get('operatingIncome', 0),
             'ebitda': info.get('ebitda', 0),
+            'ebit': get_ebit(stock, info),  # Operating Income = EBIT
             'net_income': info.get('netIncomeToCommon', 0),
             'eps': info.get('trailingEps', 0) or 0,
             'forward_eps': info.get('forwardEps', 0) or 0,
+
+            # WACC 계산용 데이터
+            'interest_expense': get_interest_expense(stock),
+            'tax_rate': get_tax_rate(stock, info),
             
             # 재무상태표
             'total_assets': info.get('totalAssets', 0),
@@ -105,6 +237,7 @@ def get_stock_data(ticker: str) -> tuple:
             # 성장률
             'revenue_growth': info.get('revenueGrowth', 0) or 0,
             'earnings_growth': info.get('earningsGrowth', 0) or 0,
+            'earnings_quarterly_growth': info.get('earningsQuarterlyGrowth', 0) or 0,
             
             # 밸류에이션
             'pe_ratio': info.get('trailingPE', 0) or 0,
@@ -281,3 +414,165 @@ def get_peers(sector: str, exclude: str) -> list:
     
     peers = sector_tickers.get(sector, [])
     return [p for p in peers if p.upper() != exclude.upper()][:8]
+
+
+def get_peer_group_data(peer_tickers: list, max_workers: int = 5) -> list:
+    """
+    Peer Group 데이터 병렬 수집
+
+    Args:
+        peer_tickers: Peer 티커 리스트
+        max_workers: 동시 요청 수 (기본 5)
+
+    Returns:
+        [{ticker, name, price, market_cap, pe_ratio, forward_pe, pb_ratio, ev_ebitda, ...}, ...]
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch_peer(ticker: str) -> dict:
+        """단일 Peer 데이터 수집"""
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+
+            if not info or info.get('regularMarketPrice') is None:
+                return {'ticker': ticker, 'error': True, 'error_msg': 'No data'}
+
+            return {
+                'ticker': ticker.upper(),
+                'name': info.get('shortName', ticker),
+                'price': info.get('currentPrice', info.get('regularMarketPrice', 0)),
+                'market_cap': info.get('marketCap', 0),
+
+                # Valuation Multiples
+                'pe_ratio': info.get('trailingPE', 0) or 0,
+                'forward_pe': info.get('forwardPE', 0) or 0,
+                'pb_ratio': info.get('priceToBook', 0) or 0,
+                'ps_ratio': info.get('priceToSalesTrailing12Months', 0) or 0,
+                'ev_ebitda': info.get('enterpriseToEbitda', 0) or 0,
+                'ev_revenue': info.get('enterpriseToRevenue', 0) or 0,
+
+                # Growth & Margins
+                'revenue_growth': info.get('revenueGrowth', 0) or 0,
+                'earnings_growth': info.get('earningsGrowth', 0) or 0,
+                'profit_margin': info.get('profitMargins', 0) or 0,
+                'operating_margin': info.get('operatingMargins', 0) or 0,
+
+                # Other
+                'beta': info.get('beta', 1.0) or 1.0,
+                'dividend_yield': info.get('dividendYield', 0) or 0,
+
+                'error': False
+            }
+        except Exception as e:
+            return {'ticker': ticker, 'error': True, 'error_msg': str(e)}
+
+    results = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ticker = {executor.submit(fetch_peer, ticker): ticker for ticker in peer_tickers}
+
+        for future in as_completed(future_to_ticker):
+            result = future.result()
+            if not result.get('error'):
+                results.append(result)
+
+    # 시가총액 순 정렬
+    results.sort(key=lambda x: x.get('market_cap', 0), reverse=True)
+
+    return results
+
+
+def calculate_peer_relative_valuation(target_data: dict, peer_data: list) -> dict:
+    """
+    Peer 대비 상대가치 분석
+
+    Args:
+        target_data: 타겟 기업 데이터 (get_stock_data 결과)
+        peer_data: Peer 그룹 데이터 (get_peer_group_data 결과)
+
+    Returns:
+        {
+            'peer_avg': {pe, pb, ev_ebitda, ...},
+            'peer_median': {pe, pb, ev_ebitda, ...},
+            'implied_values': {pe_based, pb_based, ev_ebitda_based, ...},
+            'premium_discount': {pe, pb, ev_ebitda, ...}  # 양수=프리미엄, 음수=디스카운트
+        }
+    """
+    if not peer_data:
+        return {'error': 'No peer data'}
+
+    # Peer 평균/중앙값 계산
+    def calc_stats(key):
+        values = [p[key] for p in peer_data if p.get(key, 0) > 0]
+        if not values:
+            return {'avg': 0, 'median': 0}
+        return {
+            'avg': sum(values) / len(values),
+            'median': sorted(values)[len(values) // 2]
+        }
+
+    pe_stats = calc_stats('pe_ratio')
+    forward_pe_stats = calc_stats('forward_pe')
+    pb_stats = calc_stats('pb_ratio')
+    ev_ebitda_stats = calc_stats('ev_ebitda')
+    ps_stats = calc_stats('ps_ratio')
+
+    # 타겟 기업 데이터
+    target_price = target_data.get('current_price', 0)
+    target_eps = target_data.get('eps', 0)
+
+    # BVPS: total_equity 기반 또는 Price/PB ratio 역산
+    if target_data.get('total_equity', 0) > 0 and target_data.get('shares_outstanding', 0) > 0:
+        target_bvps = target_data.get('total_equity', 0) / target_data.get('shares_outstanding', 1)
+    elif target_price > 0 and target_data.get('pb_ratio', 0) > 0:
+        target_bvps = target_price / target_data.get('pb_ratio')
+    else:
+        target_bvps = 0
+
+    target_revenue_ps = target_data.get('revenue', 0) / target_data.get('shares_outstanding', 1) if target_data.get('shares_outstanding', 0) > 0 else 0
+
+    # Implied Value 계산
+    implied = {}
+    if target_eps > 0 and pe_stats['avg'] > 0:
+        implied['pe_based'] = target_eps * pe_stats['avg']
+    if target_eps > 0 and forward_pe_stats['avg'] > 0:
+        implied['forward_pe_based'] = target_eps * forward_pe_stats['avg']
+    if target_bvps > 0 and pb_stats['avg'] > 0:
+        implied['pb_based'] = target_bvps * pb_stats['avg']
+    if target_revenue_ps > 0 and ps_stats['avg'] > 0:
+        implied['ps_based'] = target_revenue_ps * ps_stats['avg']
+
+    # Premium/Discount 계산
+    premium = {}
+    target_pe = target_data.get('pe_ratio', 0)
+    target_pb = target_data.get('pb_ratio', 0)
+    target_ev_ebitda = target_data.get('ev_ebitda', 0)
+
+    if target_pe > 0 and pe_stats['avg'] > 0:
+        premium['pe'] = (target_pe / pe_stats['avg'] - 1) * 100
+    if target_pb > 0 and pb_stats['avg'] > 0:
+        premium['pb'] = (target_pb / pb_stats['avg'] - 1) * 100
+    if target_ev_ebitda > 0 and ev_ebitda_stats['avg'] > 0:
+        premium['ev_ebitda'] = (target_ev_ebitda / ev_ebitda_stats['avg'] - 1) * 100
+
+    return {
+        'peer_count': len(peer_data),
+        'peer_avg': {
+            'pe': pe_stats['avg'],
+            'forward_pe': forward_pe_stats['avg'],
+            'pb': pb_stats['avg'],
+            'ev_ebitda': ev_ebitda_stats['avg'],
+            'ps': ps_stats['avg']
+        },
+        'peer_median': {
+            'pe': pe_stats['median'],
+            'forward_pe': forward_pe_stats['median'],
+            'pb': pb_stats['median'],
+            'ev_ebitda': ev_ebitda_stats['median'],
+            'ps': ps_stats['median']
+        },
+        'implied_values': implied,
+        'premium_discount': premium,
+        'current_price': target_price
+    }

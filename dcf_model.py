@@ -1,12 +1,20 @@
 """
-dcf_model.py - Wall Street Style DCF Model (v3)
+dcf_model.py - Wall Street Style DCF Model (v4)
 - 3Y CAGR 기반 Base Growth
 - Bull/Bear는 Revenue Growth + Exit Multiple만 조절
+- WACC 자동 계산 (Synthetic Rating, Adjusted Beta)
 """
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
+
+from valuation_utils import (
+    calculate_full_wacc,
+    validate_terminal_growth,
+    check_reinvestment_feasibility
+)
+from data_fetcher import get_risk_free_rate
 
 # 섹터별 기본값 + 성장률 Cap
 SECTOR_DEFAULTS = {
@@ -125,17 +133,49 @@ class DCFAssumptions:
 
 
 class WallStreetDCF:
-    """월가 스타일 DCF 모델 (v3)"""
-    
+    """월가 스타일 DCF 모델 (v4 - WACC 자동화)"""
+
     def __init__(self, financial_data: dict):
         self.data = financial_data
         self.sector = financial_data.get('sector', 'Default')
         self.sector_defaults = SECTOR_DEFAULTS.get(self.sector, SECTOR_DEFAULTS['Default'])
         self.historical = self._extract_historical()
-        
+
         self.actual_fcf = financial_data.get('fcf', 0)
         self.actual_fcf_margin = self.actual_fcf / financial_data.get('revenue', 1) if financial_data.get('revenue', 0) > 0 else 0
+
+        # WACC 계산 (자동)
+        self.risk_free_rate = get_risk_free_rate()
+        self.wacc_data = None  # calculate_auto_wacc()로 계산
     
+    def calculate_auto_wacc(
+        self,
+        market_risk_premium: float = 0.055,
+        use_adjusted_beta: bool = True,
+        include_cash_in_debt: bool = False
+    ) -> Dict:
+        """
+        WACC 자동 계산 (Synthetic Rating + Adjusted Beta)
+
+        Returns:
+            {
+                'wacc': float,
+                'cost_of_equity': dict,
+                'cost_of_debt': dict,
+                'calculation_log': list
+            }
+        """
+        wacc_result = calculate_full_wacc(
+            financial_data=self.data,
+            risk_free_rate=self.risk_free_rate,
+            market_risk_premium=market_risk_premium,
+            use_adjusted_beta=use_adjusted_beta,
+            include_cash_in_debt=include_cash_in_debt
+        )
+
+        self.wacc_data = wacc_result
+        return wacc_result
+
     def _extract_historical(self) -> pd.DataFrame:
         """과거 재무 데이터 추출"""
         hist_list = self.data.get('historical_financials', [])

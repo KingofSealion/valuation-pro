@@ -1,7 +1,7 @@
 """
 Stock Valuation Pro - Multi-Method Valuation Dashboard
 - Tab 1: DCF Valuation (절대가치)
-- Tab 2: Peer Comparison (상대가치)
+- Tab 2: Relative Valuation (상대가치)
 - Tab 3: Summary (Football Field Chart)
 """
 import streamlit as st
@@ -14,7 +14,8 @@ warnings.filterwarnings('ignore')
 
 from data_fetcher import (
     get_stock_data as _get_stock_data, get_peers,
-    get_peer_group_data as _get_peer_group_data, calculate_peer_relative_valuation
+    get_peer_group_data as _get_peer_group_data,
+    get_historical_valuation as _get_historical_valuation
 )
 from dcf_model import WallStreetDCF
 
@@ -26,6 +27,10 @@ def get_stock_data(ticker: str):
 @st.cache_data(ttl=600, show_spinner=False)
 def get_peer_group_data(peer_tickers: tuple):
     return _get_peer_group_data(list(peer_tickers))
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_historical_valuation(ticker: str):
+    return _get_historical_valuation(ticker)
 
 st.set_page_config(page_title="Stock Valuation Pro", page_icon="📊", layout="wide")
 
@@ -118,7 +123,7 @@ col4.metric("Sector", data.get('sector', 'N/A'))
 st.divider()
 
 # ===== 3-Tab 구조 =====
-tab1, tab2, tab3 = st.tabs(["📊 DCF Valuation", "📈 Peer Comparison", "🎯 Summary"])
+tab1, tab2, tab3 = st.tabs(["📊 DCF Valuation", "📈 Relative Valuation", "🎯 Summary"])
 
 # ============================================================
 # TAB 1: DCF Valuation
@@ -290,7 +295,7 @@ with tab1:
     wacc_result = dcf_model.calculate_auto_wacc()
     auto_wacc = wacc_result['wacc'] * 100
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         # 성장률 옵션들 (DCF에 적합한 지표들)
@@ -298,6 +303,15 @@ with tab1:
         revenue_ttm_pct = revenue_growth * 100
         revenue_cagr_pct = revenue_cagr * 100
         smart_growth_pct = smart_defaults['assumptions']['initial_growth'] * 100
+
+        # Growth Source별 값 매핑
+        growth_values = {
+            "Smart Default": smart_growth_pct,
+            "FCF CAGR": fcf_cagr_pct,
+            "Revenue Growth": revenue_ttm_pct,
+            "Revenue CAGR": revenue_cagr_pct,
+            "Manual": 10.0
+        }
 
         growth_source = st.radio(
             "Growth Rate Source",
@@ -307,35 +321,57 @@ with tab1:
             key="growth_source"
         )
 
+        # Growth Source 변경 감지 및 값 업데이트
+        prev_source = st.session_state.get('_prev_growth_source', None)
+        if prev_source != growth_source:
+            # 소스가 변경되면 해당 값으로 업데이트
+            if growth_source != "Manual":
+                st.session_state['_growth_rate_value'] = growth_values[growth_source]
+            st.session_state['_prev_growth_source'] = growth_source
+
+        # 초기값 설정
+        if '_growth_rate_value' not in st.session_state:
+            st.session_state['_growth_rate_value'] = growth_values[growth_source]
+
+        default_growth = growth_values[growth_source]
+
         if growth_source == "Smart Default":
-            default_growth = smart_growth_pct
             st.caption(f"🤖 Context-Aware: {smart_growth_pct:.1f}% (Lifecycle-based decay 적용)")
         elif growth_source == "FCF CAGR":
-            default_growth = fcf_cagr_pct
             st.caption(f"📊 Historical FCF CAGR: {fcf_cagr_pct:.1f}%")
         elif growth_source == "Revenue Growth":
-            default_growth = revenue_ttm_pct
             st.caption(f"📊 TTM Revenue Growth: {revenue_ttm_pct:.1f}%")
         elif growth_source == "Revenue CAGR":
-            default_growth = revenue_cagr_pct
             st.caption(f"📊 3Y Revenue CAGR: {revenue_cagr_pct:.1f}%")
         else:
-            default_growth = 10.0
             st.caption("✏️ Enter your estimate")
 
-        growth_rate = st.number_input(
-            "Growth Rate (%)",
-            min_value=-50.0,
-            max_value=150.0,
-            value=round(min(max(default_growth, -50.0), 150.0), 2),
-            step=1.0,
-            format="%.2f",
-            disabled=(growth_source != "Manual"),
-            key="growth_rate"
-        )
-
+        # Manual 모드가 아닐 때는 계산된 값 표시, Manual일 때는 사용자 입력
         if growth_source != "Manual":
-            growth_rate = default_growth
+            display_value = round(min(max(st.session_state['_growth_rate_value'], -50.0), 150.0), 2)
+            growth_rate = st.number_input(
+                "Growth Rate (%)",
+                min_value=-50.0,
+                max_value=150.0,
+                value=display_value,
+                step=1.0,
+                format="%.2f",
+                disabled=True,
+                key=f"growth_rate_display_{growth_source}"  # 동적 key로 값 갱신 보장
+            )
+            growth_rate = st.session_state['_growth_rate_value']
+        else:
+            growth_rate = st.number_input(
+                "Growth Rate (%)",
+                min_value=-50.0,
+                max_value=150.0,
+                value=round(min(max(st.session_state.get('_growth_rate_value', 10.0), -50.0), 150.0), 2),
+                step=1.0,
+                format="%.2f",
+                disabled=False,
+                key="growth_rate_manual"
+            )
+            st.session_state['_growth_rate_value'] = growth_rate
 
         if growth_rate > 50:
             st.warning(f"⚠️ High Growth ({growth_rate:.1f}%)")
@@ -374,7 +410,84 @@ with tab1:
         """, unsafe_allow_html=True)
 
     with col3:
-        use_auto_wacc = st.checkbox("Auto WACC", value=True, key="auto_wacc")
+        # Projection Period 옵션
+        proj_year_options = [5, 7, 10]
+
+        # Growth Source 변경 시 Projection Years 초기값도 업데이트
+        if '_prev_growth_source_for_proj' not in st.session_state:
+            st.session_state['_prev_growth_source_for_proj'] = growth_source
+        if st.session_state['_prev_growth_source_for_proj'] != growth_source:
+            if growth_source == "Smart Default":
+                st.session_state['_proj_years_value'] = lifecycle.projection_years
+            st.session_state['_prev_growth_source_for_proj'] = growth_source
+
+        # 초기값 설정
+        if '_proj_years_value' not in st.session_state:
+            if growth_source == "Smart Default":
+                st.session_state['_proj_years_value'] = lifecycle.projection_years
+            else:
+                st.session_state['_proj_years_value'] = 10
+
+        current_proj_years = st.session_state['_proj_years_value']
+        default_idx = proj_year_options.index(current_proj_years) if current_proj_years in proj_year_options else 2
+
+        if growth_source == "Smart Default":
+            selected_proj_years = st.selectbox(
+                "Projection Years",
+                options=proj_year_options,
+                index=default_idx,
+                format_func=lambda x: f"{x}Y ({lifecycle.stage_label})" if x == lifecycle.projection_years else f"{x}Y",
+                key=f"proj_years_{growth_source}"
+            )
+        else:
+            selected_proj_years = st.selectbox(
+                "Projection Years",
+                options=proj_year_options,
+                index=default_idx,
+                format_func=lambda x: f"{x}Y",
+                key=f"proj_years_{growth_source}"
+            )
+        st.session_state['_proj_years_value'] = selected_proj_years
+
+        # Decay 적용 여부 - Growth Source 변경 시 자동 토글
+        if '_prev_growth_source_for_decay' not in st.session_state:
+            st.session_state['_prev_growth_source_for_decay'] = growth_source
+            st.session_state['_apply_decay_value'] = (growth_source == "Smart Default")
+
+        if st.session_state['_prev_growth_source_for_decay'] != growth_source:
+            # Smart Default로 바뀌면 ON, 다른 것으로 바뀌면 OFF
+            st.session_state['_apply_decay_value'] = (growth_source == "Smart Default")
+            st.session_state['_prev_growth_source_for_decay'] = growth_source
+
+        apply_decay = st.checkbox(
+            "Apply Growth Decay",
+            value=st.session_state.get('_apply_decay_value', growth_source == "Smart Default"),
+            key=f"apply_decay_{growth_source}",
+            help="성장률을 Terminal Growth로 점진적 감소"
+        )
+        st.session_state['_apply_decay_value'] = apply_decay
+
+        st.markdown(f"""
+        <div class="guide-text">
+        💡 <b>Projection Settings:</b><br>
+        • Hyper-Growth: 10Y<br>
+        • High-Growth: 7Y<br>
+        • Stable: 5Y
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col4:
+        # Auto WACC 토글 상태 관리
+        if '_use_auto_wacc' not in st.session_state:
+            st.session_state['_use_auto_wacc'] = True
+            st.session_state['_manual_wacc_value'] = 8.0
+
+        use_auto_wacc = st.checkbox(
+            "Auto WACC",
+            value=st.session_state['_use_auto_wacc'],
+            key="auto_wacc_toggle"
+        )
+        st.session_state['_use_auto_wacc'] = use_auto_wacc
 
         if use_auto_wacc:
             discount_rate = st.number_input(
@@ -383,16 +496,18 @@ with tab1:
                 value=round(auto_wacc, 2),
                 step=0.5, format="%.2f",
                 disabled=True,
-                key="wacc_input"
+                key=f"wacc_auto_display"
             )
             discount_rate = auto_wacc
         else:
             discount_rate = st.number_input(
                 "Discount Rate (WACC) (%)",
                 min_value=3.0, max_value=20.0,
-                value=8.0, step=0.5, format="%.1f",
-                key="wacc_manual"
+                value=st.session_state.get('_manual_wacc_value', 8.0),
+                step=0.5, format="%.1f",
+                key="wacc_manual_input"
             )
+            st.session_state['_manual_wacc_value'] = discount_rate
         st.markdown(f"""
         <div class="guide-text">
         💡 <b>Guideline:</b><br>
@@ -436,8 +551,8 @@ with tab1:
         shares = data.get('shares_outstanding', 1)
         cash = data.get('cash', 0)
         debt = data.get('total_debt', 0)
-        # Lifecycle 기반 projection 기간 사용
-        proj_years = lifecycle.projection_years if growth_source == "Smart Default" else 10
+        # 사용자 선택 projection 기간 사용
+        proj_years = selected_proj_years
 
         if current_price <= 0 or base_fcf <= 0 or wacc_val <= tgr_val:
             return None
@@ -501,8 +616,8 @@ with tab1:
 
     st.divider()
 
-    # DCF 계산 - Lifecycle 기반 Projection Period
-    projection_years = lifecycle.projection_years if growth_source == "Smart Default" else 10
+    # DCF 계산 - 사용자 선택 Projection Period & Decay 옵션 사용
+    projection_years = selected_proj_years
     st.subheader(f"📊 Future FCF Projections ({projection_years} Years)")
 
     if base_fcf <= 0:
@@ -510,9 +625,24 @@ with tab1:
         st.stop()
 
     projections = []
-    # Smart Default 모드: Growth Decay Schedule 사용
-    use_decay_schedule = (growth_source == "Smart Default")
-    growth_schedule = smart_defaults['growth_schedule'] if use_decay_schedule else None
+    # Decay 적용 여부에 따라 Growth Schedule 생성
+    use_decay_schedule = apply_decay
+
+    if use_decay_schedule:
+        # Smart Default면 기존 schedule 사용, 아니면 새로 생성
+        if growth_source == "Smart Default" and projection_years == lifecycle.projection_years:
+            growth_schedule = smart_defaults['growth_schedule']
+        else:
+            # 선택한 projection_years에 맞게 새로 생성
+            from valuation_utils import generate_growth_decay_schedule
+            growth_schedule = generate_growth_decay_schedule(
+                initial_growth=growth_dec,
+                terminal_growth=perp_dec,
+                years=projection_years,
+                decay_type='linear'
+            )
+    else:
+        growth_schedule = None
 
     for i in range(projection_years):
         year = base_year + i + 1
@@ -767,10 +897,175 @@ with tab1:
     st.caption(f"◼ **Base Case**: WACC={disc_dec*100:.1f}%, TGR={perp_dec*100:.1f}% → **${dcf_price:.2f}**")
 
 # ============================================================
-# TAB 2: Peer Comparison
+# TAB 2: Relative Valuation
 # ============================================================
 with tab2:
-    st.subheader("🏢 Peer Group Selection")
+    current_price = data.get('current_price', 0)
+    trailing_eps = data.get('eps', 0)
+    forward_eps = data.get('forward_eps', 0)
+
+    # ===== Section 1: Historical Valuation =====
+    st.subheader("📊 Historical Valuation (vs Own History)")
+
+    # Historical 데이터 가져오기
+    if 'hist_val' not in st.session_state or st.session_state.get('hist_val_ticker') != ticker:
+        with st.spinner("Loading historical valuation data..."):
+            hist_val = get_historical_valuation(ticker)
+            st.session_state['hist_val'] = hist_val
+            st.session_state['hist_val_ticker'] = ticker
+    else:
+        hist_val = st.session_state['hist_val']
+
+    if 'error' not in hist_val and hist_val.get('data_points', 0) > 0:
+        pe_data = hist_val['pe']
+        pb_data = hist_val['pb']
+        fwd_pe_data = hist_val['forward_pe']
+
+        # PE Band 카드
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # PE 분석
+            pe_vs_avg = pe_data['vs_avg_pct']
+            if pe_vs_avg < -10:
+                pe_status = "Below Average"
+                pe_color = "#22c55e"
+            elif pe_vs_avg > 10:
+                pe_status = "Above Average"
+                pe_color = "#ef4444"
+            else:
+                pe_status = "Near Average"
+                pe_color = "#f59e0b"
+
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, rgba(102,126,234,0.1), rgba(118,75,162,0.1));
+                        padding: 20px; border-radius: 12px; border-left: 5px solid #667eea;">
+                <h4 style="margin:0 0 15px 0;">P/E Ratio Band (5Y)</h4>
+                <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                    <span>Low: <b>{pe_data['low']:.1f}x</b></span>
+                    <span>Avg: <b>{pe_data['avg']:.1f}x</b></span>
+                    <span>High: <b>{pe_data['high']:.1f}x</b></span>
+                </div>
+                <div style="background: #e5e7eb; border-radius: 10px; height: 24px; position: relative; margin: 15px 0;">
+                    <div style="position: absolute; left: 50%; transform: translateX(-50%); width: 3px;
+                                height: 100%; background: #667eea; border-radius: 3px;"></div>
+                    <div style="position: absolute; left: {min(max((pe_data['current'] - pe_data['low']) / (pe_data['high'] - pe_data['low']) * 100, 0), 100):.0f}%;
+                                transform: translateX(-50%); width: 16px; height: 24px;
+                                background: {pe_color}; border-radius: 4px;"></div>
+                </div>
+                <div style="text-align: center; margin-top: 10px;">
+                    <span style="font-size: 1.5rem; font-weight: bold; color: {pe_color};">{pe_data['current']:.1f}x</span>
+                    <span style="font-size: 0.9rem; color: {pe_color}; margin-left: 10px;">({pe_vs_avg:+.1f}% vs Avg)</span>
+                    <br><span style="font-size: 0.85rem; color: #666;">{pe_status} | {pe_data['percentile']:.0f}th Percentile</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col2:
+            # Forward PE vs Trailing PE
+            if fwd_pe_data['current'] > 0:
+                fwd_vs_trailing = fwd_pe_data['vs_trailing']
+                if fwd_vs_trailing < -10:
+                    fwd_msg = "Growth Expected (Fwd PE lower)"
+                    fwd_color = "#22c55e"
+                elif fwd_vs_trailing > 10:
+                    fwd_msg = "Earnings Decline Expected"
+                    fwd_color = "#ef4444"
+                else:
+                    fwd_msg = "Stable Earnings Expected"
+                    fwd_color = "#6b7280"
+
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, rgba(16,185,129,0.1), rgba(5,150,105,0.1));
+                            padding: 20px; border-radius: 12px; border-left: 5px solid #10b981;">
+                    <h4 style="margin:0 0 15px 0;">Forward vs Trailing P/E</h4>
+                    <div style="display: flex; justify-content: space-around; text-align: center;">
+                        <div>
+                            <div style="font-size: 0.85rem; color: #666;">Trailing P/E</div>
+                            <div style="font-size: 1.8rem; font-weight: bold; color: #667eea;">{pe_data['current']:.1f}x</div>
+                        </div>
+                        <div style="font-size: 2rem; color: #ccc; align-self: center;">→</div>
+                        <div>
+                            <div style="font-size: 0.85rem; color: #666;">Forward P/E</div>
+                            <div style="font-size: 1.8rem; font-weight: bold; color: #10b981;">{fwd_pe_data['current']:.1f}x</div>
+                        </div>
+                    </div>
+                    <div style="text-align: center; margin-top: 15px;">
+                        <span style="color: {fwd_color}; font-size: 0.9rem;">{fwd_msg} ({fwd_vs_trailing:+.1f}%)</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.info("Forward P/E 데이터 없음")
+
+        # PE Band Chart
+        if pe_data['history']:
+            with st.expander("📈 P/E Trend Chart (5Y)", expanded=False):
+                dates = [p['date'] for p in pe_data['history']]
+                pe_values = [p['pe'] for p in pe_data['history']]
+
+                fig_pe = go.Figure()
+                fig_pe.add_trace(go.Scatter(
+                    x=dates, y=pe_values,
+                    mode='lines',
+                    name='P/E',
+                    line=dict(color='#667eea', width=2),
+                    fill='tozeroy',
+                    fillcolor='rgba(102, 126, 234, 0.1)'
+                ))
+                # Average line
+                fig_pe.add_hline(y=pe_data['avg'], line_dash="dash", line_color="#f59e0b",
+                                annotation_text=f"5Y Avg: {pe_data['avg']:.1f}x")
+                # Current marker
+                fig_pe.add_hline(y=pe_data['current'], line_dash="dot", line_color="#22c55e",
+                                annotation_text=f"Current: {pe_data['current']:.1f}x", annotation_position="bottom right")
+
+                fig_pe.update_layout(
+                    title=f"{ticker} Historical P/E Ratio",
+                    xaxis_title="",
+                    yaxis_title="P/E Ratio",
+                    height=300,
+                    margin=dict(t=40, b=40),
+                    showlegend=False
+                )
+                st.plotly_chart(fig_pe, use_container_width=True)
+
+        # Historical 기반 Implied Price
+        st.markdown("**Historical P/E Based Valuation**")
+        hist_cols = st.columns(4)
+        with hist_cols[0]:
+            if pe_data['avg'] > 0 and trailing_eps > 0:
+                hist_avg_price = pe_data['avg'] * trailing_eps
+                hist_avg_upside = (hist_avg_price / current_price - 1) * 100 if current_price > 0 else 0
+                st.metric("@ 5Y Avg P/E", f"${hist_avg_price:.2f}", f"{hist_avg_upside:+.1f}%")
+        with hist_cols[1]:
+            if pe_data['low'] > 0 and trailing_eps > 0:
+                hist_low_price = pe_data['low'] * trailing_eps
+                st.metric("@ 5Y Low P/E", f"${hist_low_price:.2f}", "Bear Case")
+        with hist_cols[2]:
+            if pe_data['high'] > 0 and trailing_eps > 0:
+                hist_high_price = pe_data['high'] * trailing_eps
+                st.metric("@ 5Y High P/E", f"${hist_high_price:.2f}", "Bull Case")
+        with hist_cols[3]:
+            if forward_eps > 0 and pe_data['avg'] > 0:
+                fwd_fair_price = pe_data['avg'] * forward_eps
+                fwd_upside = (fwd_fair_price / current_price - 1) * 100 if current_price > 0 else 0
+                st.metric("@ Fwd EPS + Avg P/E", f"${fwd_fair_price:.2f}", f"{fwd_upside:+.1f}%")
+
+        # session_state에 저장
+        if pe_data['avg'] > 0 and trailing_eps > 0:
+            st.session_state['hist_pe_fair_value'] = pe_data['avg'] * trailing_eps
+        else:
+            st.session_state['hist_pe_fair_value'] = 0
+
+    else:
+        st.warning("⚠️ Historical valuation 데이터를 가져올 수 없습니다.")
+        pe_data = {'current': data.get('pe_ratio', 0), 'avg': 0, 'high': 0, 'low': 0}
+
+    st.divider()
+
+    # ===== Section 2: Peer Comparison =====
+    st.subheader("🏢 Peer Comparison")
 
     # Peer 자동 선정
     default_peers = get_peers(data.get('sector', 'Technology'), ticker)
@@ -804,39 +1099,18 @@ with tab2:
         if not peer_data:
             st.warning("⚠️ Peer 데이터를 가져올 수 없습니다.")
         else:
-            st.success(f"✅ {len(peer_data)} peers loaded")
-
-            # Peer Comparison Table
-            st.subheader("📊 Valuation Multiples Comparison")
-
-            # EPS Growth 계산 (Forward EPS / Trailing EPS - 1)
-            trailing_eps = data.get('eps', 0)
-            forward_eps = data.get('forward_eps', 0)
+            # EPS Growth 계산
             if trailing_eps > 0 and forward_eps > 0:
                 target_eps_growth = (forward_eps - trailing_eps) / trailing_eps
             else:
                 target_eps_growth = data.get('earnings_growth', 0) or 0
 
-            # PEG Ratio 계산 (P/E / EPS Growth%)
+            # PEG Ratio 계산
             target_pe = data.get('pe_ratio', 0)
             if target_pe > 0 and target_eps_growth > 0:
                 target_peg = target_pe / (target_eps_growth * 100)
             else:
                 target_peg = 0
-
-            # 타겟 기업 데이터 추가
-            target_row = {
-                'ticker': f"**{ticker}**",
-                'name': data.get('name', ticker),
-                'price': data.get('current_price', 0),
-                'market_cap': data.get('market_cap', 0),
-                'pe_ratio': data.get('pe_ratio', 0),
-                'forward_pe': data.get('forward_pe', 0),
-                'eps_growth': target_eps_growth,
-                'peg_ratio': target_peg,
-                'pb_ratio': data.get('pb_ratio', 0),
-                'ev_ebitda': data.get('ev_ebitda', 0),
-            }
 
             # Peer 데이터에 EPS Growth, PEG 추가
             for p in peer_data:
@@ -853,124 +1127,205 @@ with tab2:
                 else:
                     p['peg_ratio'] = 0
 
+            # Peer 평균 계산
+            peer_pes = [p.get('pe_ratio', 0) for p in peer_data if p.get('pe_ratio', 0) > 0]
+            peer_fwd_pes = [p.get('forward_pe', 0) for p in peer_data if p.get('forward_pe', 0) > 0]
+            peer_pegs = [p.get('peg_ratio', 0) for p in peer_data if p.get('peg_ratio', 0) > 0]
+
+            avg_peer_pe = sum(peer_pes) / len(peer_pes) if peer_pes else 0
+            avg_peer_fwd_pe = sum(peer_fwd_pes) / len(peer_fwd_pes) if peer_fwd_pes else 0
+            avg_peer_peg = sum(peer_pegs) / len(peer_pegs) if peer_pegs else 0
+
+            # 비교 테이블
+            st.markdown("**Valuation Multiples Comparison**")
+
+            target_row = {
+                'ticker': f"**{ticker}**",
+                'pe_ratio': data.get('pe_ratio', 0),
+                'forward_pe': data.get('forward_pe', 0),
+                'peg_ratio': target_peg,
+                'ev_ebitda': data.get('ev_ebitda', 0),
+            }
             all_data = [target_row] + peer_data
 
-            # DataFrame 생성
             df = pd.DataFrame(all_data)
-            display_df = df[['ticker', 'name', 'price', 'market_cap', 'pe_ratio', 'forward_pe', 'eps_growth', 'peg_ratio', 'ev_ebitda']].copy()
-            display_df.columns = ['Ticker', 'Company', 'Price', 'Market Cap', 'P/E', 'Fwd P/E', 'EPS Gr', 'PEG', 'EV/EBITDA']
+            display_df = df[['ticker', 'pe_ratio', 'forward_pe', 'peg_ratio', 'ev_ebitda']].copy()
+            display_df.columns = ['Ticker', 'P/E', 'Fwd P/E', 'PEG', 'EV/EBITDA']
 
-            # 포맷팅
-            display_df['Price'] = display_df['Price'].apply(lambda x: f"${x:.2f}" if x > 0 else "-")
-            display_df['Market Cap'] = display_df['Market Cap'].apply(lambda x: f"${x/1e9:.1f}B" if x > 0 else "-")
             display_df['P/E'] = display_df['P/E'].apply(lambda x: f"{x:.1f}x" if x > 0 else "-")
             display_df['Fwd P/E'] = display_df['Fwd P/E'].apply(lambda x: f"{x:.1f}x" if x > 0 else "-")
-            display_df['EPS Gr'] = display_df['EPS Gr'].apply(lambda x: f"{x*100:.1f}%" if x != 0 else "-")
             display_df['PEG'] = display_df['PEG'].apply(lambda x: f"{x:.2f}" if x > 0 else "-")
             display_df['EV/EBITDA'] = display_df['EV/EBITDA'].apply(lambda x: f"{x:.1f}x" if x > 0 else "-")
 
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-            # PEG Ratio 가이드
-            st.caption("💡 **PEG Ratio**: P/E ÷ EPS Growth%. PEG < 1 = 저평가, PEG > 2 = 고평가 (일반적 기준)")
+            # Peer 기반 Premium/Discount
+            st.markdown("**vs Peer Average**")
+            prem_cols = st.columns(4)
+            with prem_cols[0]:
+                if target_pe > 0 and avg_peer_pe > 0:
+                    pe_prem = (target_pe / avg_peer_pe - 1) * 100
+                    st.metric(f"P/E (Peer Avg: {avg_peer_pe:.1f}x)", f"{target_pe:.1f}x", f"{pe_prem:+.1f}%")
+            with prem_cols[1]:
+                target_fwd_pe = data.get('forward_pe', 0)
+                if target_fwd_pe > 0 and avg_peer_fwd_pe > 0:
+                    fwd_pe_prem = (target_fwd_pe / avg_peer_fwd_pe - 1) * 100
+                    st.metric(f"Fwd P/E (Avg: {avg_peer_fwd_pe:.1f}x)", f"{target_fwd_pe:.1f}x", f"{fwd_pe_prem:+.1f}%")
+            with prem_cols[2]:
+                if target_peg > 0 and avg_peer_peg > 0:
+                    peg_prem = (target_peg / avg_peer_peg - 1) * 100
+                    st.metric(f"PEG (Avg: {avg_peer_peg:.2f})", f"{target_peg:.2f}", f"{peg_prem:+.1f}%")
+            with prem_cols[3]:
+                # Peer 기반 Implied Price
+                if avg_peer_pe > 0 and trailing_eps > 0:
+                    peer_implied = avg_peer_pe * trailing_eps
+                    peer_upside = (peer_implied / current_price - 1) * 100 if current_price > 0 else 0
+                    st.metric("Peer P/E Implied", f"${peer_implied:.2f}", f"{peer_upside:+.1f}%")
+                    st.session_state['peer_result'] = {
+                        'peer_fair_value': peer_implied,
+                        'peer_avg_pe': avg_peer_pe,
+                        'premium_discount': (target_pe / avg_peer_pe - 1) * 100 if avg_peer_pe > 0 else 0
+                    }
 
-            st.divider()
+    st.divider()
 
-            # 상대가치 분석
-            st.subheader("💹 Relative Valuation Analysis")
+    # ===== Section 3: Valuation Simulator =====
+    st.subheader("🎛️ Valuation Simulator")
 
-            relative = calculate_peer_relative_valuation(data, peer_data)
+    sim_cols = st.columns([2, 1])
 
-            if 'error' not in relative:
-                # Peer 평균 PEG 계산
-                peer_pegs = [p.get('peg_ratio', 0) for p in peer_data if p.get('peg_ratio', 0) > 0]
-                avg_peg = sum(peer_pegs) / len(peer_pegs) if peer_pegs else 0
+    with sim_cols[0]:
+        # PE 슬라이더 범위 설정
+        if 'error' not in hist_val and pe_data.get('low', 0) > 0:
+            pe_min = max(pe_data['low'] * 0.8, 5.0)
+            pe_max = min(pe_data['high'] * 1.2, 100.0)
+            pe_default = pe_data['current'] if pe_data['current'] > 0 else 20.0
+        else:
+            pe_min, pe_max, pe_default = 10.0, 50.0, 20.0
 
-                # Peer 평균 EPS Growth 계산
-                peer_eps_growths = [p.get('eps_growth', 0) for p in peer_data if p.get('eps_growth', 0) > 0]
-                avg_eps_growth = sum(peer_eps_growths) / len(peer_eps_growths) if peer_eps_growths else 0
+        selected_pe = st.slider(
+            "Target P/E Ratio",
+            min_value=float(pe_min),
+            max_value=float(pe_max),
+            value=float(pe_default),
+            step=0.5,
+            key="pe_simulator"
+        )
 
-                col1, col2 = st.columns(2)
+        # EPS 선택
+        eps_option = st.radio(
+            "EPS Basis",
+            options=["Trailing EPS", "Forward EPS"],
+            horizontal=True,
+            key="eps_basis"
+        )
+        selected_eps = trailing_eps if eps_option == "Trailing EPS" else forward_eps
 
-                with col1:
-                    st.markdown("**Peer Average Multiples**")
-                    avg = relative['peer_avg']
-                    avg_df = pd.DataFrame({
-                        'Multiple': ['P/E', 'Forward P/E', 'EPS Growth', 'PEG Ratio', 'EV/EBITDA'],
-                        'Peer Avg': [
-                            f"{avg['pe']:.1f}x" if avg['pe'] > 0 else "-",
-                            f"{avg['forward_pe']:.1f}x" if avg['forward_pe'] > 0 else "-",
-                            f"{avg_eps_growth*100:.1f}%" if avg_eps_growth > 0 else "-",
-                            f"{avg_peg:.2f}" if avg_peg > 0 else "-",
-                            f"{avg['ev_ebitda']:.1f}x" if avg['ev_ebitda'] > 0 else "-"
-                        ],
-                        f'{ticker}': [
-                            f"{data.get('pe_ratio', 0):.1f}x" if data.get('pe_ratio', 0) > 0 else "-",
-                            f"{data.get('forward_pe', 0):.1f}x" if data.get('forward_pe', 0) > 0 else "-",
-                            f"{target_eps_growth*100:.1f}%" if target_eps_growth > 0 else "-",
-                            f"{target_peg:.2f}" if target_peg > 0 else "-",
-                            f"{data.get('ev_ebitda', 0):.1f}x" if data.get('ev_ebitda', 0) > 0 else "-"
-                        ]
-                    })
-                    st.dataframe(avg_df, use_container_width=True, hide_index=True)
+    with sim_cols[1]:
+        if selected_eps > 0:
+            simulated_price = selected_pe * selected_eps
+            sim_upside = (simulated_price / current_price - 1) * 100 if current_price > 0 else 0
 
-                with col2:
-                    st.markdown("**Implied Fair Value**")
-                    implied = relative['implied_values']
-                    premium = relative['premium_discount']
+            if sim_upside > 15:
+                sim_color = "#22c55e"
+                sim_verdict = "Undervalued"
+            elif sim_upside < -15:
+                sim_color = "#ef4444"
+                sim_verdict = "Overvalued"
+            else:
+                sim_color = "#f59e0b"
+                sim_verdict = "Fair Value"
 
-                    # PEG 기반 적정가 계산 (Peer Avg PEG × Target EPS Growth × Target EPS)
-                    peg_implied = 0
-                    if avg_peg > 0 and target_eps_growth > 0 and trailing_eps > 0:
-                        # Fair P/E = Avg PEG × EPS Growth%
-                        fair_pe = avg_peg * (target_eps_growth * 100)
-                        peg_implied = fair_pe * trailing_eps
+            st.markdown(f"""
+            <div style="background: {sim_color}22; padding: 25px; border-radius: 12px;
+                        border: 2px solid {sim_color}; text-align: center;">
+                <div style="font-size: 0.9rem; color: #666;">Implied Price @ {selected_pe:.1f}x P/E</div>
+                <div style="font-size: 2.5rem; font-weight: bold; color: {sim_color}; margin: 10px 0;">
+                    ${simulated_price:.2f}
+                </div>
+                <div style="font-size: 1.1rem; color: {sim_color};">{sim_upside:+.1f}% vs Current</div>
+                <div style="font-size: 0.85rem; color: #666; margin-top: 5px;">
+                    EPS: ${selected_eps:.2f} ({eps_option})
+                </div>
+                <hr style="border-color: {sim_color}44;">
+                <div style="font-size: 1.2rem; font-weight: bold; color: {sim_color};">{sim_verdict}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.warning("EPS 데이터 없음")
 
-                    implied_df = pd.DataFrame({
-                        'Method': ['P/E Based', 'PEG Based', 'P/B Based'],
-                        'Implied Price': [
-                            f"${implied.get('pe_based', 0):.2f}" if implied.get('pe_based', 0) > 0 else "-",
-                            f"${peg_implied:.2f}" if peg_implied > 0 else "-",
-                            f"${implied.get('pb_based', 0):.2f}" if implied.get('pb_based', 0) > 0 else "-"
-                        ],
-                        'vs Current': [
-                            f"{((implied.get('pe_based', 0) / current_price - 1) * 100):+.1f}%" if implied.get('pe_based', 0) > 0 and current_price > 0 else "-",
-                            f"{((peg_implied / current_price - 1) * 100):+.1f}%" if peg_implied > 0 and current_price > 0 else "-",
-                            f"{((implied.get('pb_based', 0) / current_price - 1) * 100):+.1f}%" if implied.get('pb_based', 0) > 0 and current_price > 0 else "-"
-                        ]
-                    })
-                    st.dataframe(implied_df, use_container_width=True, hide_index=True)
+    st.divider()
 
-                # 프리미엄/디스카운트 표시
-                st.divider()
-                st.markdown("**Premium / Discount vs Peers**")
+    # ===== Section 4: Fair Value Summary =====
+    st.subheader("💰 Relative Valuation Summary")
 
-                prem_cols = st.columns(4)
-                if 'pe' in premium:
-                    with prem_cols[0]:
-                        pe_prem = premium['pe']
-                        st.metric("P/E", f"{pe_prem:+.1f}%", delta=None)
-                # PEG 프리미엄/디스카운트
-                if target_peg > 0 and avg_peg > 0:
-                    with prem_cols[1]:
-                        peg_prem = (target_peg / avg_peg - 1) * 100
-                        st.metric("PEG", f"{peg_prem:+.1f}%", delta=None)
-                if 'pb' in premium:
-                    with prem_cols[2]:
-                        pb_prem = premium['pb']
-                        st.metric("P/B", f"{pb_prem:+.1f}%", delta=None)
-                if 'ev_ebitda' in premium:
-                    with prem_cols[3]:
-                        ev_prem = premium['ev_ebitda']
-                        st.metric("EV/EBITDA", f"{ev_prem:+.1f}%", delta=None)
+    summary_data = []
 
-                # Peer 기반 적정주가를 session_state에 저장
-                peer_fair_value = implied.get('pe_based', 0) if implied.get('pe_based', 0) > 0 else implied.get('pb_based', 0)
-                st.session_state['peer_result'] = {
-                    'peer_fair_value': peer_fair_value,
-                    'peer_avg_pe': avg['pe'],
-                    'premium_discount': premium.get('pe', 0)
-                }
+    # 1. Historical PE 기반
+    if 'error' not in hist_val and pe_data.get('avg', 0) > 0 and trailing_eps > 0:
+        hist_fair = pe_data['avg'] * trailing_eps
+        summary_data.append({
+            'Method': 'Historical 5Y Avg P/E',
+            'Multiple': f"{pe_data['avg']:.1f}x",
+            'Fair Value': hist_fair,
+            'Upside': (hist_fair / current_price - 1) * 100 if current_price > 0 else 0
+        })
+
+    # 2. Peer PE 기반
+    if 'peer_result' in st.session_state and st.session_state['peer_result'].get('peer_fair_value', 0) > 0:
+        peer_fair = st.session_state['peer_result']['peer_fair_value']
+        peer_pe = st.session_state['peer_result']['peer_avg_pe']
+        summary_data.append({
+            'Method': 'Peer Avg P/E',
+            'Multiple': f"{peer_pe:.1f}x",
+            'Fair Value': peer_fair,
+            'Upside': (peer_fair / current_price - 1) * 100 if current_price > 0 else 0
+        })
+
+    # 3. Forward PE 기반
+    if forward_eps > 0 and pe_data.get('avg', 0) > 0:
+        fwd_fair = pe_data['avg'] * forward_eps
+        summary_data.append({
+            'Method': 'Forward EPS @ Hist Avg P/E',
+            'Multiple': f"{pe_data['avg']:.1f}x",
+            'Fair Value': fwd_fair,
+            'Upside': (fwd_fair / current_price - 1) * 100 if current_price > 0 else 0
+        })
+
+    if summary_data:
+        summary_df = pd.DataFrame(summary_data)
+        summary_df['Fair Value'] = summary_df['Fair Value'].apply(lambda x: f"${x:.2f}")
+        summary_df['Upside'] = summary_df['Upside'].apply(lambda x: f"{x:+.1f}%")
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+        # 평균 Fair Value
+        avg_fair = sum([d['Fair Value'] if isinstance(d['Fair Value'], float) else float(d['Fair Value'].replace('$', '').replace(',', '')) for d in summary_data]) / len(summary_data) if summary_data else 0
+        # 다시 계산
+        fair_values = []
+        if 'error' not in hist_val and pe_data.get('avg', 0) > 0 and trailing_eps > 0:
+            fair_values.append(pe_data['avg'] * trailing_eps)
+        if 'peer_result' in st.session_state and st.session_state['peer_result'].get('peer_fair_value', 0) > 0:
+            fair_values.append(st.session_state['peer_result']['peer_fair_value'])
+
+        if fair_values:
+            avg_relative_fair = sum(fair_values) / len(fair_values)
+            st.session_state['relative_fair_value'] = avg_relative_fair
+
+            avg_upside = (avg_relative_fair / current_price - 1) * 100 if current_price > 0 else 0
+            st.markdown(f"""
+            <div style="background: linear-gradient(90deg, #667eea22, #764ba222);
+                        padding: 15px 20px; border-radius: 10px; text-align: center; margin-top: 10px;">
+                <span style="font-size: 1rem;">📊 Average Relative Fair Value:</span>
+                <span style="font-size: 1.5rem; font-weight: bold; color: #667eea; margin-left: 10px;">
+                    ${avg_relative_fair:.2f}
+                </span>
+                <span style="font-size: 1rem; color: {'#22c55e' if avg_upside > 0 else '#ef4444'}; margin-left: 10px;">
+                    ({avg_upside:+.1f}%)
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("Fair Value 계산을 위한 데이터가 부족합니다. Peer 데이터를 로드해주세요.")
 
 # ============================================================
 # TAB 3: Summary (Football Field Chart)

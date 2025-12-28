@@ -667,3 +667,189 @@ def calculate_peer_relative_valuation(target_data: dict, peer_data: list) -> dic
         'premium_discount': premium,
         'current_price': target_price
     }
+
+
+def get_historical_valuation(ticker: str, years: int = 5) -> dict:
+    """
+    Historical PE/PB Band 계산 (5년 기준)
+
+    Returns:
+        {
+            'pe': {'current', 'avg', 'high', 'low', 'percentile', 'history': [...]},
+            'pb': {'current', 'avg', 'high', 'low', 'percentile', 'history': [...]},
+            'forward_pe': {...},
+            'current_price': float,
+            'ttm_eps': float,
+            'bvps': float
+        }
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+
+        # 현재 가격 및 EPS
+        current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+        ttm_eps = info.get('trailingEps', 0) or 0
+        forward_eps = info.get('forwardEps', 0) or 0
+        book_value = info.get('bookValue', 0) or 0  # BVPS
+
+        # 현재 멀티플
+        current_pe = current_price / ttm_eps if ttm_eps > 0 else 0
+        current_forward_pe = current_price / forward_eps if forward_eps > 0 else 0
+        current_pb = current_price / book_value if book_value > 0 else 0
+
+        # 과거 주가 가져오기
+        hist = stock.history(period=f'{years}y')
+        if hist.empty:
+            return {'error': 'No price history'}
+
+        # 연간 EPS 가져오기
+        income_stmt = stock.income_stmt
+        if income_stmt is None or income_stmt.empty:
+            return {'error': 'No income statement'}
+
+        # EPS 히스토리 구축 (연도별)
+        eps_by_year = {}
+        if 'Basic EPS' in income_stmt.index:
+            for col in income_stmt.columns:
+                year = col.year
+                eps_val = income_stmt.loc['Basic EPS', col]
+                if pd.notna(eps_val) and eps_val > 0:
+                    eps_by_year[year] = float(eps_val)
+        elif 'Diluted EPS' in income_stmt.index:
+            for col in income_stmt.columns:
+                year = col.year
+                eps_val = income_stmt.loc['Diluted EPS', col]
+                if pd.notna(eps_val) and eps_val > 0:
+                    eps_by_year[year] = float(eps_val)
+
+        # Book Value 히스토리 (Balance Sheet)
+        balance_sheet = stock.balance_sheet
+        bvps_by_year = {}
+        shares_by_year = {}
+
+        if balance_sheet is not None and not balance_sheet.empty:
+            for col in balance_sheet.columns:
+                year = col.year
+                # Stockholders Equity
+                equity = None
+                for name in ['Stockholders Equity', 'Total Equity Gross Minority Interest', 'Common Stock Equity']:
+                    if name in balance_sheet.index:
+                        val = balance_sheet.loc[name, col]
+                        if pd.notna(val):
+                            equity = float(val)
+                            break
+
+                # Shares Outstanding (추정)
+                shares = info.get('sharesOutstanding', 0)
+                if equity and shares > 0:
+                    bvps_by_year[year] = equity / shares
+
+        # PE 히스토리 계산 (월별 평균)
+        pe_history = []
+        pb_history = []
+
+        # 월별로 집계
+        hist['YearMonth'] = hist.index.to_period('M')
+        monthly_prices = hist.groupby('YearMonth')['Close'].mean()
+
+        for ym, avg_price in monthly_prices.items():
+            year = ym.year
+            month = ym.month
+
+            # 해당 연도의 EPS 사용 (회계연도 기준 근사)
+            # 회계연도가 다를 수 있으므로, 해당 연도 또는 이전 연도 EPS 사용
+            eps_for_period = eps_by_year.get(year) or eps_by_year.get(year - 1) or eps_by_year.get(year + 1)
+
+            if eps_for_period and eps_for_period > 0:
+                pe = avg_price / eps_for_period
+                if 0 < pe < 200:  # 이상치 제거
+                    pe_history.append({
+                        'date': f"{year}-{month:02d}",
+                        'price': float(avg_price),
+                        'eps': eps_for_period,
+                        'pe': pe
+                    })
+
+            # PB 계산
+            bvps_for_period = bvps_by_year.get(year) or bvps_by_year.get(year - 1)
+            if bvps_for_period and bvps_for_period > 0:
+                pb = avg_price / bvps_for_period
+                if 0 < pb < 100:
+                    pb_history.append({
+                        'date': f"{year}-{month:02d}",
+                        'price': float(avg_price),
+                        'bvps': bvps_for_period,
+                        'pb': pb
+                    })
+
+        # PE 통계
+        if pe_history:
+            pe_values = [p['pe'] for p in pe_history]
+            pe_avg = sum(pe_values) / len(pe_values)
+            pe_high = max(pe_values)
+            pe_low = min(pe_values)
+
+            # Percentile 계산 (현재 PE가 과거 대비 몇 %ile인지)
+            if current_pe > 0:
+                below_count = sum(1 for p in pe_values if p < current_pe)
+                pe_percentile = (below_count / len(pe_values)) * 100
+            else:
+                pe_percentile = 50
+
+            pe_result = {
+                'current': current_pe,
+                'avg': pe_avg,
+                'high': pe_high,
+                'low': pe_low,
+                'percentile': pe_percentile,
+                'vs_avg_pct': ((current_pe / pe_avg) - 1) * 100 if pe_avg > 0 else 0,
+                'history': pe_history
+            }
+        else:
+            pe_result = {'current': current_pe, 'avg': 0, 'high': 0, 'low': 0, 'percentile': 50, 'vs_avg_pct': 0, 'history': []}
+
+        # PB 통계
+        if pb_history:
+            pb_values = [p['pb'] for p in pb_history]
+            pb_avg = sum(pb_values) / len(pb_values)
+            pb_high = max(pb_values)
+            pb_low = min(pb_values)
+
+            if current_pb > 0:
+                below_count = sum(1 for p in pb_values if p < current_pb)
+                pb_percentile = (below_count / len(pb_values)) * 100
+            else:
+                pb_percentile = 50
+
+            pb_result = {
+                'current': current_pb,
+                'avg': pb_avg,
+                'high': pb_high,
+                'low': pb_low,
+                'percentile': pb_percentile,
+                'vs_avg_pct': ((current_pb / pb_avg) - 1) * 100 if pb_avg > 0 else 0,
+                'history': pb_history
+            }
+        else:
+            pb_result = {'current': current_pb, 'avg': 0, 'high': 0, 'low': 0, 'percentile': 50, 'vs_avg_pct': 0, 'history': []}
+
+        # Forward PE (현재만)
+        forward_pe_result = {
+            'current': current_forward_pe,
+            'vs_trailing': ((current_forward_pe / current_pe) - 1) * 100 if current_pe > 0 and current_forward_pe > 0 else 0
+        }
+
+        return {
+            'pe': pe_result,
+            'pb': pb_result,
+            'forward_pe': forward_pe_result,
+            'current_price': current_price,
+            'ttm_eps': ttm_eps,
+            'forward_eps': forward_eps,
+            'bvps': book_value,
+            'data_points': len(pe_history)
+        }
+
+    except Exception as e:
+        return {'error': str(e)}

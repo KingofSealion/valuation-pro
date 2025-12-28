@@ -15,9 +15,14 @@ warnings.filterwarnings('ignore')
 from data_fetcher import (
     get_stock_data as _get_stock_data, get_peers,
     get_peer_group_data as _get_peer_group_data,
-    get_historical_valuation as _get_historical_valuation
+    get_historical_valuation as _get_historical_valuation,
+    get_earnings_history as _get_earnings_history
 )
 from dcf_model import WallStreetDCF
+from risk_model import (
+    generate_risk_scorecard, get_risk_color, get_risk_emoji, get_flag_icon,
+    RiskLevel
+)
 
 # Caching으로 Rate Limit 방지 (10분간 캐시)
 @st.cache_data(ttl=600, show_spinner=False)
@@ -31,6 +36,10 @@ def get_peer_group_data(peer_tickers: tuple):
 @st.cache_data(ttl=600, show_spinner=False)
 def get_historical_valuation(ticker: str):
     return _get_historical_valuation(ticker)
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_earnings_history(ticker: str):
+    return _get_earnings_history(ticker)
 
 st.set_page_config(page_title="Stock Valuation Pro", page_icon="📊", layout="wide")
 
@@ -508,6 +517,10 @@ with tab1:
                 key="wacc_manual_input"
             )
             st.session_state['_manual_wacc_value'] = discount_rate
+
+        # Risk Scorecard에서 사용할 WACC 저장 (decimal 형태)
+        st.session_state['calculated_wacc'] = discount_rate / 100
+
         st.markdown(f"""
         <div class="guide-text">
         💡 <b>Guideline:</b><br>
@@ -921,8 +934,21 @@ with tab2:
         pb_data = hist_val['pb']
         fwd_pe_data = hist_val['forward_pe']
 
+        # PEG 계산
+        if trailing_eps > 0 and forward_eps > 0:
+            eps_growth_rate = ((forward_eps - trailing_eps) / trailing_eps) * 100  # %
+        else:
+            eps_growth_rate = data.get('earnings_growth', 0) or 0
+            if eps_growth_rate and eps_growth_rate > 1:  # 이미 % 형태가 아닌 경우
+                eps_growth_rate = eps_growth_rate * 100
+
+        if eps_growth_rate > 0 and pe_data['current'] > 0:
+            peg_ratio = pe_data['current'] / eps_growth_rate
+        else:
+            peg_ratio = None
+
         # PE Band 카드
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             # PE 분석
@@ -998,6 +1024,80 @@ with tab2:
             else:
                 st.info("Forward P/E 데이터 없음")
 
+        with col3:
+            # PEG 분석 카드
+            if peg_ratio is not None:
+                # PEG 해석
+                if peg_ratio < 0.5:
+                    peg_status = "Significantly Undervalued"
+                    peg_color = "#059669"  # 진한 초록
+                    peg_emoji = "🔥"
+                elif peg_ratio < 1:
+                    peg_status = "Undervalued (GARP)"
+                    peg_color = "#22c55e"  # 초록
+                    peg_emoji = "✅"
+                elif peg_ratio <= 1.5:
+                    peg_status = "Fair Valued"
+                    peg_color = "#f59e0b"  # 노랑
+                    peg_emoji = "⚖️"
+                elif peg_ratio <= 2:
+                    peg_status = "Modestly Overvalued"
+                    peg_color = "#f97316"  # 주황
+                    peg_emoji = "⚠️"
+                else:
+                    peg_status = "Overvalued vs Growth"
+                    peg_color = "#ef4444"  # 빨강
+                    peg_emoji = "🚨"
+
+                # PE가 높아도 PEG가 낮으면 긍정적 메시지
+                if pe_data['current'] > pe_data['avg'] and peg_ratio < 1:
+                    insight_msg = "High P/E but strong growth justifies premium"
+                    insight_color = "#059669"
+                elif pe_data['current'] < pe_data['avg'] and peg_ratio < 1:
+                    insight_msg = "Low P/E + Low PEG = Strong Value"
+                    insight_color = "#059669"
+                elif peg_ratio > 2:
+                    insight_msg = "Growth doesn't justify current valuation"
+                    insight_color = "#ef4444"
+                else:
+                    insight_msg = f"P/E {pe_data['current']:.1f}x ÷ EPS Growth {eps_growth_rate:.1f}%"
+                    insight_color = "#6b7280"
+
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, rgba(168,85,247,0.1), rgba(139,92,246,0.1));
+                            padding: 20px; border-radius: 12px; border-left: 5px solid #a855f7;">
+                    <h4 style="margin:0 0 15px 0;">PEG Ratio Analysis</h4>
+                    <div style="text-align: center;">
+                        <div style="font-size: 2.5rem; font-weight: bold; color: {peg_color};">{peg_ratio:.2f}x</div>
+                        <div style="font-size: 1.1rem; color: {peg_color}; margin: 5px 0;">{peg_emoji} {peg_status}</div>
+                    </div>
+                    <div style="background: #f3f4f6; padding: 10px; border-radius: 8px; margin-top: 12px;">
+                        <div style="font-size: 0.8rem; color: #666; text-align: center;">
+                            <span style="color: {insight_color}; font-weight: 500;">{insight_msg}</span>
+                        </div>
+                    </div>
+                    <div style="font-size: 0.75rem; color: #888; margin-top: 10px; text-align: center;">
+                        PEG &lt;1 = Growth at Reasonable Price
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                # PEG 계산 불가 (성장률 음수 등)
+                if eps_growth_rate <= 0:
+                    reason = "Negative or zero EPS growth"
+                else:
+                    reason = "P/E data unavailable"
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, rgba(168,85,247,0.1), rgba(139,92,246,0.1));
+                            padding: 20px; border-radius: 12px; border-left: 5px solid #a855f7;">
+                    <h4 style="margin:0 0 15px 0;">PEG Ratio Analysis</h4>
+                    <div style="text-align: center; padding: 20px 0;">
+                        <div style="font-size: 1.2rem; color: #888;">N/A</div>
+                        <div style="font-size: 0.85rem; color: #666; margin-top: 5px;">{reason}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
         # PE Band Chart
         if pe_data['history']:
             with st.expander("📈 P/E Trend Chart (5Y)", expanded=False):
@@ -1032,7 +1132,7 @@ with tab2:
 
         # Historical 기반 Implied Price
         st.markdown("**Historical P/E Based Valuation**")
-        hist_cols = st.columns(4)
+        hist_cols = st.columns(5)
         with hist_cols[0]:
             if pe_data['avg'] > 0 and trailing_eps > 0:
                 hist_avg_price = pe_data['avg'] * trailing_eps
@@ -1051,6 +1151,34 @@ with tab2:
                 fwd_fair_price = pe_data['avg'] * forward_eps
                 fwd_upside = (fwd_fair_price / current_price - 1) * 100 if current_price > 0 else 0
                 st.metric("@ Fwd EPS + Avg P/E", f"${fwd_fair_price:.2f}", f"{fwd_upside:+.1f}%")
+        with hist_cols[4]:
+            # PEG = 1 기준 Fair Value (P/E = EPS Growth %)
+            if eps_growth_rate > 0 and trailing_eps > 0:
+                peg_fair_pe = eps_growth_rate  # PEG = 1이면 P/E = Growth Rate
+                peg_fair_price = peg_fair_pe * trailing_eps
+                peg_upside = (peg_fair_price / current_price - 1) * 100 if current_price > 0 else 0
+                st.metric("@ PEG = 1", f"${peg_fair_price:.2f}", f"{peg_upside:+.1f}%")
+            else:
+                st.metric("@ PEG = 1", "N/A", "No growth data")
+
+        # PEG 인사이트 박스
+        if peg_ratio is not None:
+            if peg_ratio < 1:
+                peg_insight = f"💡 **PEG Insight**: Current PEG {peg_ratio:.2f}x < 1 indicates stock may be **undervalued relative to growth**. Even if P/E ({pe_data['current']:.1f}x) looks high, growth rate ({eps_growth_rate:.1f}%) justifies the valuation."
+                insight_type = "success"
+            elif peg_ratio <= 1.5:
+                peg_insight = f"💡 **PEG Insight**: Current PEG {peg_ratio:.2f}x ≈ 1 suggests **fair valuation**. Price reflects expected earnings growth appropriately."
+                insight_type = "info"
+            else:
+                peg_insight = f"⚠️ **PEG Insight**: Current PEG {peg_ratio:.2f}x > 1.5 suggests stock may be **overvalued relative to growth**. P/E ({pe_data['current']:.1f}x) not fully justified by growth rate ({eps_growth_rate:.1f}%)."
+                insight_type = "warning"
+
+            if insight_type == "success":
+                st.success(peg_insight)
+            elif insight_type == "warning":
+                st.warning(peg_insight)
+            else:
+                st.info(peg_insight)
 
         # session_state에 저장
         if pe_data['avg'] > 0 and trailing_eps > 0:
@@ -1292,6 +1420,24 @@ with tab2:
             'Upside': (fwd_fair / current_price - 1) * 100 if current_price > 0 else 0
         })
 
+    # 4. PEG = 1 기반 Fair Value
+    # PEG = 1이면 P/E = EPS Growth Rate가 되어야 함
+    if trailing_eps > 0 and forward_eps > 0:
+        eps_growth_pct = ((forward_eps - trailing_eps) / trailing_eps) * 100
+    else:
+        eps_growth_pct = (data.get('earnings_growth', 0) or 0)
+        if eps_growth_pct and eps_growth_pct < 1:  # 소수 형태인 경우
+            eps_growth_pct = eps_growth_pct * 100
+
+    if eps_growth_pct > 0 and trailing_eps > 0:
+        peg_fair_value = eps_growth_pct * trailing_eps  # PEG = 1 means P/E = Growth %
+        summary_data.append({
+            'Method': 'PEG = 1 (GARP)',
+            'Multiple': f"{eps_growth_pct:.1f}x P/E",
+            'Fair Value': peg_fair_value,
+            'Upside': (peg_fair_value / current_price - 1) * 100 if current_price > 0 else 0
+        })
+
     if summary_data:
         summary_df = pd.DataFrame(summary_data)
         summary_df['Fair Value'] = summary_df['Fair Value'].apply(lambda x: f"${x:.2f}")
@@ -1306,6 +1452,9 @@ with tab2:
             fair_values.append(pe_data['avg'] * trailing_eps)
         if 'peer_result' in st.session_state and st.session_state['peer_result'].get('peer_fair_value', 0) > 0:
             fair_values.append(st.session_state['peer_result']['peer_fair_value'])
+        # PEG = 1 기반 Fair Value 추가
+        if eps_growth_pct > 0 and trailing_eps > 0:
+            fair_values.append(eps_growth_pct * trailing_eps)
 
         if fair_values:
             avg_relative_fair = sum(fair_values) / len(fair_values)
@@ -1331,6 +1480,87 @@ with tab2:
 # TAB 3: Summary (Football Field Chart)
 # ============================================================
 with tab3:
+    # ===== Risk Scorecard Banner =====
+    # WACC 값 가져오기 (Tab 1에서 계산된 값 또는 기본값)
+    wacc_for_risk = st.session_state.get('calculated_wacc', 0.10)  # 기본 10%
+
+    # Earnings Surprise 데이터 가져오기
+    earnings_surprises = get_earnings_history(ticker)
+
+    # Risk Scorecard 생성
+    risk_scorecard = generate_risk_scorecard(
+        ticker=ticker,
+        financial_data=data,
+        wacc=wacc_for_risk,
+        earnings_surprises=earnings_surprises
+    )
+
+    # Risk Level에 따른 색상
+    bg_color, text_color = get_risk_color(risk_scorecard.risk_level)
+    risk_emoji = get_risk_emoji(risk_scorecard.risk_level)
+
+    # Risk Banner
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, {bg_color}22, {bg_color}11);
+                padding: 20px; border-radius: 12px; border: 2px solid {bg_color};
+                margin-bottom: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <span style="font-size: 1.4rem; font-weight: bold; color: {bg_color};">
+                    {risk_emoji} VALUE TRAP RISK: {risk_scorecard.risk_level.name}
+                </span>
+                <span style="font-size: 0.9rem; color: #666; margin-left: 15px;">
+                    ({risk_scorecard.flags_triggered}/{risk_scorecard.total_flags} flags triggered)
+                </span>
+            </div>
+            <div style="text-align: right;">
+                <span style="font-size: 0.85rem; color: {text_color};">{risk_scorecard.summary}</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 개별 Risk Flags 표시
+    with st.expander("📋 Risk Assessment Details", expanded=False):
+        flag_cols = st.columns(5)
+
+        for i, flag in enumerate(risk_scorecard.flags):
+            with flag_cols[i % 5]:
+                icon = get_flag_icon(flag)
+
+                if flag.severity == "danger":
+                    flag_bg = "#fee2e2"
+                    flag_border = "#ef4444"
+                elif flag.severity == "warning":
+                    flag_bg = "#fef3c7"
+                    flag_border = "#f59e0b"
+                else:
+                    flag_bg = "#dcfce7"
+                    flag_border = "#22c55e"
+
+                st.markdown(f"""
+                <div style="background: {flag_bg}; padding: 12px; border-radius: 8px;
+                            border-left: 4px solid {flag_border}; margin-bottom: 10px; min-height: 100px;">
+                    <div style="font-size: 0.8rem; font-weight: bold; color: #374151;">
+                        {icon} {flag.name}
+                    </div>
+                    <div style="font-size: 0.75rem; color: #6b7280; margin-top: 5px;">
+                        {flag.message}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # 권고사항
+        if risk_scorecard.risk_level == RiskLevel.HIGH:
+            st.error(f"⚠️ **Recommendation**: {risk_scorecard.recommendation}")
+        elif risk_scorecard.risk_level == RiskLevel.MODERATE:
+            st.warning(f"💡 **Recommendation**: {risk_scorecard.recommendation}")
+        else:
+            st.success(f"✅ **Recommendation**: {risk_scorecard.recommendation}")
+
+    st.divider()
+
+    # ===== Valuation Summary Section =====
     st.subheader("🎯 Valuation Summary - Football Field Chart")
 
     current_price = data.get('current_price', 0)

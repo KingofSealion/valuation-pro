@@ -105,6 +105,129 @@ def get_preferred_stock(balance_sheet) -> float:
         return 0
 
 
+def get_total_equity(info: dict, balance_sheet) -> float:
+    """
+    총 자본(Total Stockholders Equity) 추출
+
+    info.get('totalStockholderEquity')가 0 또는 None인 경우,
+    Balance Sheet에서 직접 가져온다.
+
+    이슈: ADBE 등 일부 종목에서 info에서 0이 반환되는 버그 존재
+
+    Returns:
+        Total Equity 값
+    """
+    # 방법 1: info에서 가져오기
+    equity_from_info = info.get('totalStockholderEquity', 0) or 0
+
+    if equity_from_info > 0:
+        return equity_from_info
+
+    # 방법 2: Balance Sheet에서 직접 추출
+    try:
+        if balance_sheet is None or balance_sheet.empty:
+            return 0
+
+        latest_col = balance_sheet.columns[0]
+
+        # 가능한 행 이름들 (우선순위)
+        possible_names = [
+            'Stockholders Equity',
+            'Total Equity Gross Minority Interest',
+            'Common Stock Equity',
+            'Total Stockholders Equity',
+            'Stockholder Equity'
+        ]
+
+        for name in possible_names:
+            if name in balance_sheet.index:
+                val = balance_sheet.loc[name, latest_col]
+                if pd.notna(val) and val > 0:
+                    return float(val)
+
+        return 0
+    except Exception:
+        return 0
+
+
+def get_cash_only(balance_sheet) -> float:
+    """
+    현금 및 현금성 자산만 추출 (단기투자 제외)
+
+    ROIC 계산 시 Invested Capital에서 차감할 현금은
+    'Cash And Cash Equivalents'만 사용해야 정확함.
+    yfinance의 info.totalCash는 단기투자까지 포함하여 과대계상됨.
+
+    Returns:
+        Cash and Cash Equivalents 값
+    """
+    try:
+        if balance_sheet is None or balance_sheet.empty:
+            return 0
+
+        latest_col = balance_sheet.columns[0]
+
+        # 가능한 행 이름들
+        possible_names = [
+            'Cash And Cash Equivalents',
+            'Cash',
+            'CashAndCashEquivalents'
+        ]
+
+        for name in possible_names:
+            if name in balance_sheet.index:
+                val = balance_sheet.loc[name, latest_col]
+                if pd.notna(val):
+                    return float(val)
+
+        return 0
+    except Exception:
+        return 0
+
+
+def get_operating_cashflow(info: dict, cash_flow) -> float:
+    """
+    영업활동현금흐름(Operating Cash Flow) 추출
+
+    info.get('operatingCashflow')가 0 또는 None인 경우,
+    Cashflow Statement에서 직접 가져온다.
+
+    이슈: ADBE 등 일부 종목에서 info에서 None 반환되는 버그 존재
+
+    Returns:
+        Operating Cash Flow 값
+    """
+    # 방법 1: info에서 가져오기
+    ocf_from_info = info.get('operatingCashflow', 0) or 0
+
+    if ocf_from_info != 0:
+        return ocf_from_info
+
+    # 방법 2: Cashflow Statement에서 직접 추출
+    try:
+        if cash_flow is None or cash_flow.empty:
+            return 0
+
+        latest_col = cash_flow.columns[0]
+
+        # 가능한 행 이름들
+        possible_names = [
+            'Operating Cash Flow',
+            'Cash Flow From Operating Activities',
+            'Net Cash Provided By Operating Activities'
+        ]
+
+        for name in possible_names:
+            if name in cash_flow.index:
+                val = cash_flow.loc[name, latest_col]
+                if pd.notna(val):
+                    return float(val)
+
+        return 0
+    except Exception:
+        return 0
+
+
 def get_interest_expense(stock) -> float:
     """
     이자비용(Interest Expense) 추출
@@ -284,7 +407,7 @@ def get_stock_data(ticker: str) -> tuple:
             
             # 재무상태표
             'total_assets': info.get('totalAssets', 0),
-            'total_equity': info.get('totalStockholderEquity', 0),
+            'total_equity': get_total_equity(info, balance_sheet),  # Balance Sheet fallback
             'total_debt': info.get('totalDebt', 0),
             'net_debt': info.get('netDebt', 0),
             'cash': info.get('totalCash', 0),
@@ -296,7 +419,7 @@ def get_stock_data(ticker: str) -> tuple:
             'preferred_stock': get_preferred_stock(balance_sheet),
             
             # 현금흐름 (TTM은 quarterly 데이터로 계산)
-            'operating_cf': info.get('operatingCashflow', 0),
+            'operating_cf': get_operating_cashflow(info, cash_flow),  # Cashflow fallback
             'fcf': calculate_ttm_fcf(stock),  # quarterly 기반 TTM FCF
             
             # 비율
@@ -853,3 +976,154 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
 
     except Exception as e:
         return {'error': str(e)}
+
+
+def get_earnings_history(ticker: str) -> list:
+    """
+    Earnings Surprise 히스토리 가져오기 (최근 4분기)
+
+    yfinance의 stock.earnings 또는 stock.quarterly_earnings에서 추출
+
+    Returns:
+        [
+            {'quarter': '2024Q3', 'actual': 1.52, 'estimate': 1.48, 'surprise_pct': 2.7},
+            {'quarter': '2024Q2', 'actual': 1.40, 'estimate': 1.42, 'surprise_pct': -1.4},
+            ...
+        ]
+    """
+    try:
+        stock = yf.Ticker(ticker)
+
+        # 방법 1: quarterly_earnings 사용
+        quarterly = stock.quarterly_earnings
+        if quarterly is not None and not quarterly.empty:
+            results = []
+            for idx in quarterly.index[:4]:  # 최근 4분기
+                row = quarterly.loc[idx]
+
+                # 컬럼 이름이 다를 수 있음
+                actual = None
+                estimate = None
+
+                if 'Reported EPS' in row.index:
+                    actual = float(row['Reported EPS']) if pd.notna(row['Reported EPS']) else None
+                elif 'Actual' in row.index:
+                    actual = float(row['Actual']) if pd.notna(row['Actual']) else None
+
+                if 'EPS Estimate' in row.index:
+                    estimate = float(row['EPS Estimate']) if pd.notna(row['EPS Estimate']) else None
+                elif 'Estimate' in row.index:
+                    estimate = float(row['Estimate']) if pd.notna(row['Estimate']) else None
+
+                if actual is not None:
+                    surprise_pct = 0
+                    if estimate and estimate != 0:
+                        surprise_pct = ((actual - estimate) / abs(estimate)) * 100
+
+                    quarter_str = str(idx)
+                    if hasattr(idx, 'strftime'):
+                        quarter_str = idx.strftime('%Y-Q') + str((idx.month - 1) // 3 + 1)
+
+                    results.append({
+                        'quarter': quarter_str,
+                        'actual': actual,
+                        'estimate': estimate,
+                        'surprise_pct': surprise_pct
+                    })
+
+            if results:
+                return results
+
+        # 방법 2: earnings_history 사용 (일부 종목)
+        try:
+            history = stock.earnings_history
+            if history is not None and not history.empty:
+                results = []
+                for idx, row in history.head(4).iterrows():
+                    actual = row.get('epsActual', row.get('Actual', None))
+                    estimate = row.get('epsEstimate', row.get('Estimate', None))
+
+                    if actual is not None and pd.notna(actual):
+                        actual = float(actual)
+                        estimate = float(estimate) if estimate and pd.notna(estimate) else None
+
+                        surprise_pct = 0
+                        if estimate and estimate != 0:
+                            surprise_pct = ((actual - estimate) / abs(estimate)) * 100
+
+                        quarter_str = str(idx) if not hasattr(idx, 'strftime') else idx.strftime('%Y-%m')
+
+                        results.append({
+                            'quarter': quarter_str,
+                            'actual': actual,
+                            'estimate': estimate,
+                            'surprise_pct': surprise_pct
+                        })
+
+                if results:
+                    return results
+        except Exception:
+            pass
+
+        # 방법 3: earnings 사용 (연간 데이터라도 최근 값 추출)
+        try:
+            earnings = stock.earnings
+            if earnings is not None and not earnings.empty:
+                results = []
+                # 최근 연도 데이터
+                for idx in earnings.index[-2:]:  # 최근 2개년
+                    row = earnings.loc[idx]
+                    actual = None
+
+                    if 'Earnings' in row.index:
+                        actual = float(row['Earnings']) if pd.notna(row['Earnings']) else None
+                    elif isinstance(row, (int, float)):
+                        actual = float(row)
+
+                    if actual is not None:
+                        results.append({
+                            'quarter': f"FY{idx}",
+                            'actual': actual,
+                            'estimate': None,
+                            'surprise_pct': 0  # 연간은 surprise 계산 어려움
+                        })
+
+                return results
+        except Exception:
+            pass
+
+        return []
+
+    except Exception:
+        return []
+
+
+def get_revenue_cagr(historical_financials: list, years: int = 3) -> float:
+    """
+    Historical financials에서 Revenue CAGR 계산
+
+    Args:
+        historical_financials: get_stock_data()['historical_financials']
+        years: CAGR 계산 기간
+
+    Returns:
+        CAGR (decimal, e.g., 0.15 = 15%)
+    """
+    if not historical_financials or len(historical_financials) < 2:
+        return 0
+
+    revenues = [h.get('revenue', 0) for h in historical_financials if h.get('revenue', 0) > 0]
+
+    if len(revenues) < 2:
+        return 0
+
+    # historical_financials는 최신이 먼저 (역순)
+    n = min(years, len(revenues) - 1)
+    end_revenue = revenues[0]  # 최신
+    start_revenue = revenues[n]  # n년 전
+
+    if start_revenue <= 0 or end_revenue <= 0:
+        return 0
+
+    cagr = (end_revenue / start_revenue) ** (1 / n) - 1
+    return cagr

@@ -138,7 +138,55 @@ tab1, tab2, tab3 = st.tabs(["📊 DCF Valuation", "📈 Relative Valuation", "�
 # TAB 1: DCF Valuation
 # ============================================================
 with tab1:
-    st.subheader("📈 Historical Free Cash Flow")
+    # ===== Value Trap Risk Badge (상단 표시) =====
+    # 사전 계산: Risk Scorecard
+    from risk_model import generate_risk_scorecard, RiskLevel, get_risk_emoji
+
+    # WACC 계산 (Risk Scorecard에 필요)
+    _temp_dcf = WallStreetDCF(data)
+    _temp_wacc_result = _temp_dcf.calculate_auto_wacc()
+    _temp_wacc = _temp_wacc_result['wacc']
+
+    # Earnings History (캐싱)
+    if 'earnings_history' not in st.session_state or st.session_state.get('earnings_ticker') != ticker:
+        _earnings_hist = get_earnings_history(ticker)
+        st.session_state['earnings_history'] = _earnings_hist
+        st.session_state['earnings_ticker'] = ticker
+    else:
+        _earnings_hist = st.session_state['earnings_history']
+
+    # Risk Scorecard 생성
+    risk_scorecard = generate_risk_scorecard(
+        ticker=ticker,
+        financial_data=data,
+        wacc=_temp_wacc,
+        earnings_surprises=_earnings_hist
+    )
+
+    # Badge 색상
+    if risk_scorecard.risk_level == RiskLevel.LOW:
+        badge_bg, badge_text = "#dcfce7", "#166534"
+        badge_emoji = "🟢"
+    elif risk_scorecard.risk_level == RiskLevel.MODERATE:
+        badge_bg, badge_text = "#fef3c7", "#92400e"
+        badge_emoji = "🟡"
+    else:
+        badge_bg, badge_text = "#fee2e2", "#991b1b"
+        badge_emoji = "🔴"
+
+    # Badge 표시
+    badge_col1, badge_col2 = st.columns([3, 1])
+    with badge_col1:
+        st.subheader("📈 Historical Free Cash Flow")
+    with badge_col2:
+        st.markdown(f"""
+        <div style="background:{badge_bg}; color:{badge_text}; padding:8px 16px; border-radius:20px; text-align:center; font-weight:bold;">
+            {badge_emoji} {risk_scorecard.risk_level.value.upper()} RISK ({risk_scorecard.flags_triggered}/{risk_scorecard.total_flags})
+        </div>
+        """, unsafe_allow_html=True)
+
+    # session_state에 저장 (Tab 3에서 재사용)
+    st.session_state['risk_scorecard'] = risk_scorecard
 
     historical = data.get('historical_financials', [])
 
@@ -303,197 +351,233 @@ with tab1:
 
     wacc_result = dcf_model.calculate_auto_wacc()
     auto_wacc = wacc_result['wacc'] * 100
+    smart_growth_pct = smart_defaults['assumptions']['initial_growth'] * 100
+    fcf_cagr_pct = historical_fcf_cagr * 100
+    revenue_ttm_pct = revenue_growth * 100
+    revenue_cagr_pct = revenue_cagr * 100
+
+    # Smart Default 버튼 - 클릭 시 모든 값을 추천안으로 세팅
+    if st.button("🤖 Smart Default 적용", help="모든 값을 추천안으로 자동 세팅"):
+        # 내부 상태
+        st.session_state['_growth_rate_value'] = smart_growth_pct
+        st.session_state['_proj_years'] = lifecycle.projection_years
+        st.session_state['_apply_decay'] = True
+        st.session_state['_tv_method'] = "Both"
+        st.session_state['_use_auto_wacc'] = True
+        # 위젯 key 직접 설정
+        st.session_state['growth_rate_input'] = round(smart_growth_pct, 2)
+        st.session_state['proj_years_select'] = lifecycle.projection_years
+        st.session_state['apply_decay_check'] = True
+        st.session_state['tv_method_radio'] = "Both"
+        st.session_state['auto_wacc_toggle'] = True
+        st.rerun()
+
+    st.caption(f"🤖 Smart Default: {lifecycle.stage_label} | Growth: {smart_growth_pct:.1f}% | {lifecycle.projection_years}Y | Decay ON | WACC: {auto_wacc:.1f}%")
 
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        # 성장률 옵션들 (DCF에 적합한 지표들)
-        fcf_cagr_pct = historical_fcf_cagr * 100
-        revenue_ttm_pct = revenue_growth * 100
-        revenue_cagr_pct = revenue_cagr * 100
-        smart_growth_pct = smart_defaults['assumptions']['initial_growth'] * 100
-
-        # Growth Source별 값 매핑
-        growth_values = {
-            "Smart Default": smart_growth_pct,
-            "FCF CAGR": fcf_cagr_pct,
-            "Revenue Growth": revenue_ttm_pct,
-            "Revenue CAGR": revenue_cagr_pct,
-            "Manual": 10.0
-        }
-
-        growth_source = st.radio(
-            "Growth Rate Source",
-            options=["Smart Default", "FCF CAGR", "Revenue Growth", "Revenue CAGR", "Manual"],
-            index=0,
-            horizontal=True,
-            key="growth_source"
-        )
-
-        # Growth Source 변경 감지 및 값 업데이트
-        prev_source = st.session_state.get('_prev_growth_source', None)
-        if prev_source != growth_source:
-            # 소스가 변경되면 해당 값으로 업데이트
-            if growth_source != "Manual":
-                st.session_state['_growth_rate_value'] = growth_values[growth_source]
-            st.session_state['_prev_growth_source'] = growth_source
-
         # 초기값 설정
         if '_growth_rate_value' not in st.session_state:
-            st.session_state['_growth_rate_value'] = growth_values[growth_source]
+            st.session_state['_growth_rate_value'] = smart_growth_pct
 
-        default_growth = growth_values[growth_source]
-
-        if growth_source == "Smart Default":
-            st.caption(f"🤖 Context-Aware: {smart_growth_pct:.1f}% (Lifecycle-based decay 적용)")
-        elif growth_source == "FCF CAGR":
-            st.caption(f"📊 Historical FCF CAGR: {fcf_cagr_pct:.1f}%")
-        elif growth_source == "Revenue Growth":
-            st.caption(f"📊 TTM Revenue Growth: {revenue_ttm_pct:.1f}%")
-        elif growth_source == "Revenue CAGR":
-            st.caption(f"📊 3Y Revenue CAGR: {revenue_cagr_pct:.1f}%")
-        else:
-            st.caption("✏️ Enter your estimate")
-
-        # Manual 모드가 아닐 때는 계산된 값 표시, Manual일 때는 사용자 입력
-        if growth_source != "Manual":
-            display_value = round(min(max(st.session_state['_growth_rate_value'], -50.0), 150.0), 2)
-            growth_rate = st.number_input(
-                "Growth Rate (%)",
-                min_value=-50.0,
-                max_value=150.0,
-                value=display_value,
-                step=1.0,
-                format="%.2f",
-                disabled=True,
-                key=f"growth_rate_display_{growth_source}"  # 동적 key로 값 갱신 보장
-            )
-            growth_rate = st.session_state['_growth_rate_value']
-        else:
-            growth_rate = st.number_input(
-                "Growth Rate (%)",
-                min_value=-50.0,
-                max_value=150.0,
-                value=round(min(max(st.session_state.get('_growth_rate_value', 10.0), -50.0), 150.0), 2),
-                step=1.0,
-                format="%.2f",
-                disabled=False,
-                key="growth_rate_manual"
-            )
-            st.session_state['_growth_rate_value'] = growth_rate
+        # Growth Rate 직접 입력
+        growth_rate = st.number_input(
+            "Growth Rate (%)",
+            min_value=-50.0,
+            max_value=150.0,
+            value=round(min(max(st.session_state.get('_growth_rate_value', smart_growth_pct), -50.0), 150.0), 2),
+            step=1.0,
+            format="%.2f",
+            key="growth_rate_input"
+        )
+        st.session_state['_growth_rate_value'] = growth_rate
 
         if growth_rate > 50:
             st.warning(f"⚠️ High Growth ({growth_rate:.1f}%)")
 
-        # Growth Rate 가이드라인
+        # 참고 데이터 표시
         st.markdown(f"""
         <div class="guide-text">
-        💡 <b>Available Data:</b><br>
-        • 🤖 Smart Default: {smart_growth_pct:.1f}%<br>
+        💡 <b>Reference:</b><br>
         • FCF CAGR: {fcf_cagr_pct:.1f}%<br>
         • Revenue TTM: {revenue_ttm_pct:.1f}%<br>
-        • Revenue CAGR: {revenue_cagr_pct:.1f}%
+        • Revenue CAGR (5Y): {revenue_cagr_pct:.1f}%
         </div>
         """, unsafe_allow_html=True)
 
     with col2:
-        rf_rate = dcf_model.risk_free_rate
-        perpetual_growth = st.number_input(
-            "Perpetual Growth Rate (%)",
-            min_value=0.0,
-            max_value=5.0,
-            value=2.5,
-            step=0.1,
-            format="%.1f",
-            key="perp_growth"
-        )
-        if perpetual_growth / 100 > rf_rate:
-            st.warning(f"⚠️ Risk-Free Rate({rf_rate*100:.1f}%) 초과!")
-        st.markdown(f"""
-        <div class="guide-text">
-        💡 <b>Guideline:</b><br>
-        • 장기 GDP 성장률 수준 (2~3%)<br>
-        • Risk-Free Rate ({rf_rate*100:.1f}%) 이하 권장<br>
-        • 인플레이션 고려 시 1.5~2.5%
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
         # Projection Period 옵션
         proj_year_options = [5, 7, 10]
 
-        # Growth Source 변경 시 Projection Years 초기값도 업데이트
-        if '_prev_growth_source_for_proj' not in st.session_state:
-            st.session_state['_prev_growth_source_for_proj'] = growth_source
-        if st.session_state['_prev_growth_source_for_proj'] != growth_source:
-            if growth_source == "Smart Default":
-                st.session_state['_proj_years_value'] = lifecycle.projection_years
-            st.session_state['_prev_growth_source_for_proj'] = growth_source
-
         # 초기값 설정
-        if '_proj_years_value' not in st.session_state:
-            if growth_source == "Smart Default":
-                st.session_state['_proj_years_value'] = lifecycle.projection_years
-            else:
-                st.session_state['_proj_years_value'] = 10
+        if '_proj_years' not in st.session_state:
+            st.session_state['_proj_years'] = lifecycle.projection_years
+        if '_apply_decay' not in st.session_state:
+            st.session_state['_apply_decay'] = True
 
-        current_proj_years = st.session_state['_proj_years_value']
-        default_idx = proj_year_options.index(current_proj_years) if current_proj_years in proj_year_options else 2
+        current_proj = st.session_state.get('_proj_years', lifecycle.projection_years)
+        default_proj_idx = proj_year_options.index(current_proj) if current_proj in proj_year_options else 0
 
-        if growth_source == "Smart Default":
-            selected_proj_years = st.selectbox(
-                "Projection Years",
-                options=proj_year_options,
-                index=default_idx,
-                format_func=lambda x: f"{x}Y ({lifecycle.stage_label})" if x == lifecycle.projection_years else f"{x}Y",
-                key=f"proj_years_{growth_source}"
-            )
-        else:
-            selected_proj_years = st.selectbox(
-                "Projection Years",
-                options=proj_year_options,
-                index=default_idx,
-                format_func=lambda x: f"{x}Y",
-                key=f"proj_years_{growth_source}"
-            )
-        st.session_state['_proj_years_value'] = selected_proj_years
-
-        # Decay 적용 여부 - Growth Source 변경 시 자동 토글
-        if '_prev_growth_source_for_decay' not in st.session_state:
-            st.session_state['_prev_growth_source_for_decay'] = growth_source
-            st.session_state['_apply_decay_value'] = (growth_source == "Smart Default")
-
-        if st.session_state['_prev_growth_source_for_decay'] != growth_source:
-            # Smart Default로 바뀌면 ON, 다른 것으로 바뀌면 OFF
-            st.session_state['_apply_decay_value'] = (growth_source == "Smart Default")
-            st.session_state['_prev_growth_source_for_decay'] = growth_source
+        selected_proj_years = st.selectbox(
+            "Projection Years",
+            options=proj_year_options,
+            index=default_proj_idx,
+            format_func=lambda x: f"{x}Y",
+            key="proj_years_select"
+        )
+        st.session_state['_proj_years'] = selected_proj_years
 
         apply_decay = st.checkbox(
             "Apply Growth Decay",
-            value=st.session_state.get('_apply_decay_value', growth_source == "Smart Default"),
-            key=f"apply_decay_{growth_source}",
+            value=st.session_state.get('_apply_decay', True),
+            key="apply_decay_check",
             help="성장률을 Terminal Growth로 점진적 감소"
         )
-        st.session_state['_apply_decay_value'] = apply_decay
+        st.session_state['_apply_decay'] = apply_decay
 
         st.markdown(f"""
         <div class="guide-text">
-        💡 <b>Projection Settings:</b><br>
+        💡 <b>Lifecycle 기준:</b><br>
         • Hyper-Growth: 10Y<br>
         • High-Growth: 7Y<br>
         • Stable: 5Y
         </div>
         """, unsafe_allow_html=True)
 
+    with col3:
+        rf_rate = dcf_model.risk_free_rate
+
+        tv_options = ["Both", "Perpetuity Growth", "Exit Multiple"]
+
+        # 초기값 설정
+        if '_tv_method' not in st.session_state:
+            st.session_state['_tv_method'] = "Both"
+
+        current_tv = st.session_state.get('_tv_method', 'Both')
+        tv_default_idx = tv_options.index(current_tv) if current_tv in tv_options else 0
+
+        # Terminal Value Method 선택
+        tv_method = st.radio(
+            "Terminal Value Method",
+            options=tv_options,
+            index=tv_default_idx,
+            horizontal=True,
+            key="tv_method_radio",
+            help="Both: 두 방식 평균"
+        )
+        st.session_state['_tv_method'] = tv_method
+
+        # Perpetuity Growth Rate 입력 (Perpetuity Growth 또는 Both일 때만)
+        if tv_method in ["Both", "Perpetuity Growth"]:
+            perpetual_growth = st.number_input(
+                "Perpetual Growth Rate (%)",
+                min_value=0.0,
+                max_value=5.0,
+                value=2.5,
+                step=0.1,
+                format="%.1f",
+                key="perp_growth",
+                help="Terminal Value 이후 영구 성장률 (GDP 수준 권장)"
+            )
+            if perpetual_growth / 100 > rf_rate:
+                st.warning(f"⚠️ Risk-Free Rate({rf_rate*100:.1f}%) 초과")
+        else:
+            perpetual_growth = 2.5  # 기본값
+
+        # Exit Multiple 관련 변수 계산
+        current_ev_ebitda = data.get('ev_ebitda', 0) or 0
+        current_fcf = data.get('fcf', 0) or 0
+        current_ebitda = data.get('ebitda', 0) or 0
+        sector_avg_multiple = dcf_model.sector_defaults.get('exit_multiple', 15)
+
+        # FCF/EBITDA 비율 계산 (Fair Multiple용)
+        if current_ebitda > 0 and current_fcf > 0:
+            fcf_to_ebitda = current_fcf / current_ebitda
+            fcf_to_ebitda = max(0.3, min(0.8, fcf_to_ebitda))
+        else:
+            fcf_to_ebitda = 0.6
+
+        # Fair Multiple (Gordon Growth 기반)
+        wacc_decimal = auto_wacc / 100
+        g_decimal = perpetual_growth / 100
+        if wacc_decimal > g_decimal:
+            fair_multiple = fcf_to_ebitda / (wacc_decimal - g_decimal)
+            fair_multiple = max(5.0, min(25.0, fair_multiple))
+        else:
+            fair_multiple = 10.0
+
+        # Target Multiple 결정
+        if selected_proj_years <= 5:
+            base_target = sector_avg_multiple
+        elif selected_proj_years >= 10:
+            base_target = fair_multiple
+        else:
+            blend = (selected_proj_years - 5) / 5
+            base_target = sector_avg_multiple - (sector_avg_multiple - fair_multiple) * blend
+
+        # Growth Decay 반영
+        if apply_decay:
+            target_multiple = base_target
+            decay_note = "Decay ON"
+        else:
+            target_multiple = (base_target + fair_multiple) / 2
+            decay_note = "Decay OFF → Fair 조정"
+
+        # Exit Multiple 결정
+        if current_ev_ebitda > 0:
+            if current_ev_ebitda > target_multiple:
+                default_exit_multiple = target_multiple
+            else:
+                default_exit_multiple = current_ev_ebitda
+        else:
+            default_exit_multiple = target_multiple
+
+        # Exit Multiple 입력 (Exit Multiple 또는 Both일 때만)
+        if tv_method in ["Both", "Exit Multiple"]:
+            exit_multiple = st.number_input(
+                "Exit EV/EBITDA Multiple",
+                min_value=3.0,
+                max_value=60.0,
+                value=float(round(default_exit_multiple, 1)),
+                step=0.5,
+                format="%.1f",
+                key=f"exit_mult_{selected_proj_years}_{apply_decay}",
+                help=f"{decay_note}"
+            )
+
+            # 구조화된 Caption
+            st.caption(f"""
+**현재:** {current_ev_ebitda:.1f}x | **섹터:** {sector_avg_multiple}x | **Fair:** {fair_multiple:.1f}x
+**{selected_proj_years}Y Target:** {target_multiple:.1f}x ({decay_note})
+""")
+        else:
+            exit_multiple = default_exit_multiple  # 기본값
+
+        # 가이드 (Exit Multiple 관련일 때만)
+        if tv_method in ["Both", "Exit Multiple"]:
+            if apply_decay:
+                guide_text = f"Decay ON → 섹터({sector_avg_multiple}x) 기준"
+            else:
+                guide_text = f"Decay OFF → Fair({fair_multiple:.1f}x)에 가깝게"
+
+            st.markdown(f"""
+            <div class="guide-text">
+            💡 <b>Exit Multiple:</b><br>
+            • 5Y+Decay → 섹터({sector_avg_multiple}x)<br>
+            • 10Y or No Decay → Fair({fair_multiple:.1f}x)<br>
+            • {guide_text}
+        </div>
+        """, unsafe_allow_html=True)
+
     with col4:
-        # Auto WACC 토글 상태 관리
+        # 초기값 설정
         if '_use_auto_wacc' not in st.session_state:
             st.session_state['_use_auto_wacc'] = True
-            st.session_state['_manual_wacc_value'] = 8.0
 
         use_auto_wacc = st.checkbox(
             "Auto WACC",
-            value=st.session_state['_use_auto_wacc'],
+            value=st.session_state.get('_use_auto_wacc', True),
             key="auto_wacc_toggle"
         )
         st.session_state['_use_auto_wacc'] = use_auto_wacc
@@ -557,71 +641,8 @@ with tab1:
     perp_dec = perpetual_growth / 100
     disc_dec = discount_rate / 100
 
-    # Market Implied FCF Growth 계산 (사용자 입력값 반영)
-    def calc_market_implied_growth(wacc_val, tgr_val):
-        """현재 주가가 암시하는 FCF Growth Rate"""
-        current_price = data.get('current_price', 0)
-        shares = data.get('shares_outstanding', 1)
-        cash = data.get('cash', 0)
-        debt = data.get('total_debt', 0)
-        # 사용자 선택 projection 기간 사용
-        proj_years = selected_proj_years
-
-        if current_price <= 0 or base_fcf <= 0 or wacc_val <= tgr_val:
-            return None
-
-        low, high = -0.5, 2.0
-        for _ in range(50):
-            mid = (low + high) / 2
-            pv_sum = 0
-            prev_fcf = base_fcf
-            for i in range(proj_years):
-                if i == 0:
-                    fcf_i = base_fcf * (1 + mid)
-                else:
-                    fcf_i = prev_fcf * (1 + mid)
-                prev_fcf = fcf_i
-                pv_sum += fcf_i / ((1 + wacc_val) ** (i + 1))
-
-            tv = prev_fcf * (1 + tgr_val) / (wacc_val - tgr_val)
-            pv_tv = tv / ((1 + wacc_val) ** proj_years)
-            equity_val = pv_sum + pv_tv + cash - debt
-            fair_price = equity_val / shares if shares > 0 else 0
-            if fair_price < current_price:
-                low = mid
-            else:
-                high = mid
-        return (low + high) / 2
-
-    market_implied = calc_market_implied_growth(disc_dec, perp_dec)
+    # Market Implied Growth는 DCF 결과 섹션 이후에 통합 표시 (중복 제거)
     current_price = data.get('current_price', 0)
-
-    # Market Implied 표시
-    if market_implied is not None:
-        implied_pct = market_implied * 100
-        diff_vs_assumption = implied_pct - growth_rate
-        if diff_vs_assumption > 5:
-            implied_color = "#ef4444"  # 빨강 - 시장이 더 높은 성장 기대
-            implied_msg = "시장이 더 높은 성장을 반영 중"
-        elif diff_vs_assumption < -5:
-            implied_color = "#22c55e"  # 초록 - 시장이 더 낮은 성장 기대
-            implied_msg = "시장이 더 낮은 성장을 반영 중"
-        else:
-            implied_color = "#6b7280"  # 회색 - 비슷
-            implied_msg = "가정과 유사"
-
-        st.markdown(f"""
-        <div style="background: linear-gradient(90deg, rgba(102,126,234,0.1), rgba(118,75,162,0.1));
-                    padding: 12px 16px; border-radius: 8px; margin: 10px 0;
-                    border-left: 4px solid #667eea;">
-            <span style="font-size: 0.9rem;">⭐ <b>Market Implied FCF Growth:</b></span>
-            <span style="font-size: 1.2rem; font-weight: bold; color: {implied_color}; margin-left: 8px;">{implied_pct:.1f}%</span>
-            <span style="font-size: 0.8rem; color: #888; margin-left: 12px;">
-                (WACC={disc_dec*100:.1f}%, TGR={perp_dec*100:.1f}% 기준 | 현재가 ${current_price:.0f})
-            </span>
-            <br><span style="font-size: 0.75rem; color: {implied_color};">→ {implied_msg} (Your assumption: {growth_rate:.1f}%)</span>
-        </div>
-        """, unsafe_allow_html=True)
 
     if disc_dec <= perp_dec:
         st.error("⚠️ Discount Rate > Perpetual Growth Rate 필요!")
@@ -642,17 +663,13 @@ with tab1:
     use_decay_schedule = apply_decay
 
     if use_decay_schedule:
-        # Smart Default면 기존 schedule 사용, 아니면 새로 생성
-        if growth_source == "Smart Default" and projection_years == lifecycle.projection_years:
-            growth_schedule = smart_defaults['growth_schedule']
-        else:
-            # 선택한 projection_years에 맞게 새로 생성
-            from valuation_utils import generate_growth_decay_schedule
-            growth_schedule = generate_growth_decay_schedule(
-                initial_growth=growth_dec,
-                terminal_growth=perp_dec,
-                years=projection_years,
-                decay_type='linear'
+        # 선택한 projection_years에 맞게 growth schedule 생성
+        from valuation_utils import generate_growth_decay_schedule
+        growth_schedule = generate_growth_decay_schedule(
+            initial_growth=growth_dec,
+            terminal_growth=perp_dec,
+            years=projection_years,
+            decay_type='linear'
             )
     else:
         growth_schedule = None
@@ -671,12 +688,39 @@ with tab1:
         else:
             fcf = projections[-1]['fcf'] * (1 + year_growth)
 
-        pv = fcf / ((1 + disc_dec) ** (i + 1))
+        # Mid-year Convention 적용: 현금흐름이 연중 발생한다고 가정
+        pv = fcf / ((1 + disc_dec) ** (i + 0.5))
         projections.append({'year': year, 'fcf': fcf, 'pv': pv, 'growth': year_growth})
 
     final_fcf = projections[-1]['fcf']
-    tv = final_fcf * (1 + perp_dec) / (disc_dec - perp_dec)
-    pv_tv = tv / ((1 + disc_dec) ** projection_years)
+    final_year_ebitda = data.get('ebitda', 0) or 0
+    if final_year_ebitda > 0 and len(projections) > 0:
+        # 마지막 해 EBITDA 추정: FCF 기반 역산 (대략적 추정)
+        # FCF ≈ EBITDA × (1 - Tax) × (1 - Reinvestment Rate)
+        # 간략화: EBITDA 성장 = FCF 성장으로 가정
+        ebitda_growth_factor = final_fcf / base_fcf if base_fcf > 0 else 1
+        final_year_ebitda = final_year_ebitda * ebitda_growth_factor
+
+    # === Terminal Value 계산 ===
+    # 1. Perpetuity Growth Method
+    tv_perpetuity = final_fcf * (1 + perp_dec) / (disc_dec - perp_dec) if disc_dec > perp_dec else 0
+    pv_tv_perpetuity = tv_perpetuity / ((1 + disc_dec) ** projection_years)
+
+    # 2. Exit Multiple Method (EV/EBITDA)
+    exit_mult_dec = exit_multiple  # 이미 숫자로 받음 (UI에서)
+    tv_exit_multiple = final_year_ebitda * exit_mult_dec if final_year_ebitda > 0 else 0
+    pv_tv_exit_multiple = tv_exit_multiple / ((1 + disc_dec) ** projection_years)
+
+    # TV Method에 따른 최종 TV 선택
+    if tv_method == "Perpetuity Growth":
+        tv = tv_perpetuity
+        pv_tv = pv_tv_perpetuity
+    elif tv_method == "Exit Multiple":
+        tv = tv_exit_multiple
+        pv_tv = pv_tv_exit_multiple
+    else:  # "Both" - 평균 사용
+        tv = (tv_perpetuity + tv_exit_multiple) / 2 if tv_exit_multiple > 0 else tv_perpetuity
+        pv_tv = (pv_tv_perpetuity + pv_tv_exit_multiple) / 2 if pv_tv_exit_multiple > 0 else pv_tv_perpetuity
 
     # Smart Default 모드에서는 연도별 성장률도 표시
     if use_decay_schedule:
@@ -726,28 +770,105 @@ with tab1:
             )
             st.plotly_chart(fig_decay, use_container_width=True)
 
-    # 결과 계산
+    # 결과 계산 - 각 방식별로 계산
     sum_pv_fcf = sum(p['pv'] for p in projections)
-    sum_pv = sum_pv_fcf + pv_tv
     cash = data.get('cash', 0)
     debt = data.get('total_debt', 0)
-    equity = sum_pv + cash - debt
     shares = data.get('shares_outstanding', 1)
-    dcf_price = equity / shares if shares > 0 else 0
     current_price = data.get('current_price', 0)
 
+    # Minority Interest, Preferred Stock 차감 (EV → Equity)
+    minority_interest = data.get('minority_interest', 0) or 0
+    preferred_stock = data.get('preferred_stock', 0) or 0
+
+    # 1. Perpetuity Growth Method 결과
+    sum_pv_perpetuity = sum_pv_fcf + pv_tv_perpetuity
+    equity_perpetuity = sum_pv_perpetuity + cash - debt - minority_interest - preferred_stock
+    dcf_price_perpetuity = equity_perpetuity / shares if shares > 0 else 0
+
+    # 2. Exit Multiple Method 결과
+    sum_pv_exit = sum_pv_fcf + pv_tv_exit_multiple
+    equity_exit = sum_pv_exit + cash - debt - minority_interest - preferred_stock
+    dcf_price_exit = equity_exit / shares if shares > 0 else 0
+
+    # 3. Blended (Both) 결과
+    if tv_method == "Perpetuity Growth":
+        dcf_price = dcf_price_perpetuity
+        sum_pv = sum_pv_perpetuity
+        equity = equity_perpetuity
+    elif tv_method == "Exit Multiple":
+        dcf_price = dcf_price_exit
+        sum_pv = sum_pv_exit
+        equity = equity_exit
+    else:  # "Both"
+        dcf_price = (dcf_price_perpetuity + dcf_price_exit) / 2 if dcf_price_exit > 0 else dcf_price_perpetuity
+        sum_pv = (sum_pv_perpetuity + sum_pv_exit) / 2 if sum_pv_exit > 0 else sum_pv_perpetuity
+        equity = (equity_perpetuity + equity_exit) / 2 if equity_exit > 0 else equity_perpetuity
+
+    # Margin of Safety 계산 및 등급 부여
+    mos_pct = (dcf_price / current_price - 1) * 100 if current_price > 0 else 0
+
+    def get_mos_grade(mos):
+        """Margin of Safety 등급 체계"""
+        if mos >= 30:
+            return "🟢 STRONG BUY", "#10b981", "High MoS - Low downside risk"
+        elif mos >= 15:
+            return "🟢 BUY", "#22c55e", "Attractive valuation"
+        elif mos >= 5:
+            return "🟡 HOLD/ACCUMULATE", "#84cc16", "Modest upside"
+        elif mos >= -10:
+            return "🟡 FAIR VALUE", "#f59e0b", "Priced appropriately"
+        elif mos >= -25:
+            return "🟠 EXPENSIVE", "#f97316", "Limited upside"
+        else:
+            return "🔴 AVOID", "#ef4444", "Significant overvaluation"
+
+    verdict, color, verdict_desc = get_mos_grade(mos_pct)
+
     # 결과를 session_state에 저장 (Tab 3에서 사용)
+    tv_pct = pv_tv / sum_pv * 100 if sum_pv > 0 else 0
     st.session_state['dcf_result'] = {
         'dcf_price': dcf_price,
+        'dcf_price_perpetuity': dcf_price_perpetuity,
+        'dcf_price_exit': dcf_price_exit if dcf_price_exit > 0 else None,
         'sum_pv': sum_pv,
         'pv_tv': pv_tv,
-        'tv_pct': pv_tv / sum_pv * 100 if sum_pv > 0 else 0
+        'tv_pct': tv_pct,
+        'mos_pct': mos_pct,
+        'verdict': verdict,
+        'tv_method': tv_method
     }
 
     st.divider()
 
     # 결과 표시
     st.subheader("💰 DCF Valuation Result")
+
+    # 두 방식 비교 테이블 (Both 선택 시)
+    if tv_method == "Both" and dcf_price_exit > 0:
+        st.markdown("##### 📊 Valuation Comparison")
+
+        diff_perp = (dcf_price_perpetuity / current_price - 1) * 100 if current_price > 0 else 0
+        diff_exit = (dcf_price_exit / current_price - 1) * 100 if current_price > 0 else 0
+
+        comparison_df = pd.DataFrame({
+            'Method': [
+                f'Perpetuity Growth (g={perp_dec*100:.1f}%)',
+                f'Exit Multiple ({exit_multiple:.1f}x EBITDA)',
+                '**Blended Average**'
+            ],
+            'Fair Value': [
+                f'${dcf_price_perpetuity:.2f}',
+                f'${dcf_price_exit:.2f}',
+                f'**${dcf_price:.2f}**'
+            ],
+            'vs Current': [
+                f'{diff_perp:+.1f}%',
+                f'{diff_exit:+.1f}%',
+                f'**{mos_pct:+.1f}%**'
+            ]
+        })
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
 
     col1, col2 = st.columns(2)
 
@@ -764,28 +885,175 @@ with tab1:
         })
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-        tv_pct = pv_tv / sum_pv * 100 if sum_pv > 0 else 0
         if tv_pct > 75:
             st.warning(f"⚠️ Terminal Value = {tv_pct:.0f}% (높음)")
 
     with col2:
-        diff = (dcf_price / current_price - 1) * 100 if current_price > 0 else 0
-        if diff > 15:
-            verdict, color = "🟢 UNDERVALUED", "#10b981"
-        elif diff > -15:
-            verdict, color = "🟡 FAIR VALUE", "#f59e0b"
-        else:
-            verdict, color = "🔴 OVERVALUED", "#ef4444"
-
         st.markdown(f"""
         <div class="result-box">
             <h2 style="margin:0;">DCF Fair Value</h2>
             <h1 style="margin:10px 0; color:#667eea;">${dcf_price:.2f}</h1>
             <hr>
-            <p><b>Current:</b> ${current_price:.2f} | <b>Diff:</b> <span style="color:{color};">{diff:+.1f}%</span></p>
-            <h3 style="color:{color};">{verdict}</h3>
+            <p><b>Current:</b> ${current_price:.2f}</p>
+            <p><b>Margin of Safety:</b> <span style="color:{color}; font-weight:bold;">{mos_pct:+.1f}%</span></p>
+            <h3 style="color:{color}; margin-top:10px;">{verdict}</h3>
+            <p style="font-size:0.85em; color:#6b7280;">{verdict_desc}</p>
         </div>
         """, unsafe_allow_html=True)
+
+    # ===== Market Implied Growth (Reverse DCF) =====
+    st.divider()
+    st.subheader("🔄 What Growth Does the Market Expect?")
+
+    # 가정 명시
+    st.caption(f"""
+    **계산 가정**: WACC={disc_dec*100:.1f}%, Terminal Growth={perp_dec*100:.1f}%,
+    Projection={projection_years}Y, Linear Decay 적용, Perpetuity TV 기준
+    """)
+
+    # Reverse DCF: 현재 주가를 정당화하는 '초기 성장률' 역산
+    def find_implied_initial_growth():
+        """Binary Search로 implied initial growth 찾기 (Linear Decay → Terminal Growth 수렴)"""
+        if current_price <= 0 or shares <= 0:
+            return None, "데이터 부족"
+
+        target_equity = current_price * shares  # 현재 시가총액 = 목표 Equity Value
+
+        low, high = -0.20, 1.50  # -20% ~ 150% 성장률 범위
+        tolerance = 0.005  # 0.5% 허용 오차
+
+        for _ in range(50):
+            mid = (low + high) / 2
+
+            # 이 '초기 성장률'로 DCF 계산 (Linear Decay로 Terminal Growth까지 감소)
+            pv_sum = 0
+            prev_fcf = base_fcf
+            for i in range(projection_years):
+                # Linear decay: 초기 → Terminal Growth로 점진 감소
+                if projection_years > 1:
+                    year_growth = mid - (mid - perp_dec) * (i / (projection_years - 1))
+                else:
+                    year_growth = mid
+
+                if i == 0:
+                    fcf_i = base_fcf * (1 + year_growth)
+                else:
+                    fcf_i = prev_fcf * (1 + year_growth)
+                prev_fcf = fcf_i
+
+                pv_i = fcf_i / ((1 + disc_dec) ** (i + 0.5))  # Mid-year
+                pv_sum += pv_i
+
+            # Terminal Value (Perpetuity 기준)
+            tv_calc = prev_fcf * (1 + perp_dec) / (disc_dec - perp_dec) if disc_dec > perp_dec else 0
+            pv_tv_calc = tv_calc / ((1 + disc_dec) ** projection_years)
+
+            ev_calc = pv_sum + pv_tv_calc
+            eq_calc = ev_calc + cash - debt - minority_interest - preferred_stock
+
+            diff_pct = (eq_calc - target_equity) / target_equity if target_equity > 0 else 0
+
+            if abs(diff_pct) < tolerance:
+                return mid, "found"
+            elif eq_calc < target_equity:
+                low = mid
+            else:
+                high = mid
+
+        # 범위 내에서 찾지 못함
+        if low >= 1.40:
+            return None, "150%+ 성장 필요 (매우 고평가)"
+        elif high <= -0.15:
+            return None, "역성장도 정당화 못함 (저평가)"
+        return mid, "approximate"
+
+    implied_growth, status = find_implied_initial_growth()
+
+    # Historical CAGR 비교용
+    hist = data.get('historical_financials', [])
+    hist_cagr = 0
+    if len(hist) >= 2:
+        revenues = [h.get('revenue', 0) for h in hist if h.get('revenue', 0) > 0]
+        if len(revenues) >= 2:
+            n = min(3, len(revenues) - 1)
+            hist_cagr = (revenues[0] / revenues[n]) ** (1/n) - 1 if revenues[n] > 0 else 0
+
+    if implied_growth is not None:
+        # 시장 기대 평가 (과거 대비)
+        if implied_growth > 0.50:
+            ig_rating = "🔴 Very Aggressive"
+            ig_color = "#ef4444"
+            ig_desc = "시장이 50%+ 성장을 가정 - 매우 낙관적 기대"
+        elif implied_growth > hist_cagr * 1.5 and hist_cagr > 0:
+            ig_rating = "🟠 Aggressive"
+            ig_color = "#f97316"
+            ig_desc = f"과거 CAGR({hist_cagr*100:.1f}%)의 1.5배 이상 기대"
+        elif implied_growth > hist_cagr * 1.1 and hist_cagr > 0:
+            ig_rating = "🟡 Slightly High"
+            ig_color = "#f59e0b"
+            ig_desc = f"과거 CAGR({hist_cagr*100:.1f}%) 약간 상회"
+        elif implied_growth > hist_cagr * 0.7:
+            ig_rating = "🟢 Reasonable"
+            ig_color = "#22c55e"
+            ig_desc = "합리적 기대 (과거 수준)"
+        else:
+            ig_rating = "🟢 Conservative"
+            ig_color = "#10b981"
+            ig_desc = "보수적 기대 (저평가 가능성)"
+
+        # UI 표시
+        ig_col1, ig_col2 = st.columns([1, 1])
+
+        with ig_col1:
+            st.markdown(f"""
+            <div style="background:{ig_color}15; padding:20px; border-radius:12px; border-left:4px solid {ig_color};">
+                <h4 style="margin:0; color:#333;">Market Implied Initial Growth</h4>
+                <h1 style="margin:10px 0; color:{ig_color};">{implied_growth*100:.1f}%</h1>
+                <p style="margin:0; color:{ig_color}; font-weight:bold;">{ig_rating}</p>
+                <p style="margin:5px 0 0 0; color:#666; font-size:0.85em;">{ig_desc}</p>
+                <p style="margin:5px 0 0 0; color:#888; font-size:0.75em;">
+                    (Y1: {implied_growth*100:.1f}% → Y{projection_years}: {perp_dec*100:.1f}% decay)
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with ig_col2:
+            # 비교 테이블
+            compare_data = {
+                'Metric': ['Market Expects (Initial)', 'Your DCF Assumption', 'Historical 3Y CAGR'],
+                'Growth Rate': [
+                    f'{implied_growth*100:.1f}%',
+                    f'{growth_dec*100:.1f}%',
+                    f'{hist_cagr*100:.1f}%' if hist_cagr > 0 else 'N/A',
+                ]
+            }
+            st.dataframe(pd.DataFrame(compare_data), use_container_width=True, hide_index=True)
+
+        # 핵심 인사이트 (명확한 해석)
+        gap = implied_growth - growth_dec  # 양수: 시장이 더 낙관적
+        if gap > 0.05:  # 시장이 5%p 이상 더 높은 성장 기대
+            st.warning(f"""
+            ⚠️ **시장 기대 > 당신의 가정** (Gap: +{gap*100:.1f}%p)
+            - 시장은 {implied_growth*100:.1f}% 성장을 기대하고 현재 가격을 형성
+            - 당신의 가정({growth_dec*100:.1f}%)이 맞다면 → **현재가는 고평가**
+            - 시장 기대치 달성 실패 시 → **주가 하락 리스크**
+            """)
+        elif gap < -0.05:  # 당신이 5%p 이상 더 높은 성장 기대
+            st.success(f"""
+            ✅ **당신의 가정 > 시장 기대** (Gap: {gap*100:.1f}%p)
+            - 시장은 {implied_growth*100:.1f}%만 기대하고 현재 가격을 형성
+            - 당신의 가정({growth_dec*100:.1f}%)이 맞다면 → **현재가는 저평가**
+            - 즉, 당신의 DCF 결과가 현재가보다 높게 나옴
+            """)
+        else:
+            st.info(f"""
+            ℹ️ **시장 기대 ≈ 당신의 가정** (Gap: {gap*100:+.1f}%p)
+            - 현재 주가는 당신의 DCF 가정과 유사한 성장률을 반영
+            - 즉, **Fair Value 근접**
+            """)
+
+    else:
+        st.warning(f"⚠️ Implied Growth 계산 불가: {status}")
 
     # ===== Sensitivity Analysis =====
     st.divider()
@@ -800,11 +1068,11 @@ with tab1:
     growth_range = [max(g, 0.0) for g in growth_range]
 
     def calc_dcf_value_full(wacc_val, tgr_val, fcf_growth_val, use_schedule=False, schedule=None):
-        """주어진 WACC, Terminal Growth, FCF Growth로 DCF 가치 계산"""
+        """주어진 WACC, Terminal Growth, FCF Growth로 DCF 가치 계산 (Mid-year Convention 적용)"""
         if wacc_val <= tgr_val:
             return None
 
-        # FCF 프로젝션 PV
+        # FCF 프로젝션 PV (Mid-year Convention)
         pv_sum = 0
         prev_fcf = base_fcf
         for i in range(projection_years):
@@ -819,16 +1087,17 @@ with tab1:
                 fcf_i = prev_fcf * (1 + g)
             prev_fcf = fcf_i
 
-            pv_i = fcf_i / ((1 + wacc_val) ** (i + 1))
+            # Mid-year Convention: (i + 0.5) 적용
+            pv_i = fcf_i / ((1 + wacc_val) ** (i + 0.5))
             pv_sum += pv_i
 
         # Terminal Value
         tv_calc = prev_fcf * (1 + tgr_val) / (wacc_val - tgr_val)
         pv_tv_calc = tv_calc / ((1 + wacc_val) ** projection_years)
 
-        # Equity Value
+        # Equity Value (Minority Interest, Preferred Stock 차감)
         ev_calc = pv_sum + pv_tv_calc
-        equity_calc = ev_calc + cash - debt
+        equity_calc = ev_calc + cash - debt - minority_interest - preferred_stock
         price_calc = equity_calc / shares if shares > 0 else 0
         return price_calc
 
@@ -908,6 +1177,145 @@ with tab1:
 
     # 범례 설명
     st.caption(f"◼ **Base Case**: WACC={disc_dec*100:.1f}%, TGR={perp_dec*100:.1f}% → **${dcf_price:.2f}**")
+
+    # ===== Bull / Base / Bear Scenario Table =====
+    st.divider()
+    st.subheader("🎯 Bull / Base / Bear Scenarios")
+
+    # 시나리오 파라미터 정의
+    # Base: 현재 설정값
+    # Bull: 성장률 +20%, WACC -1%p, Exit Multiple +2x
+    # Bear: 성장률 -30%, WACC +1%p, Exit Multiple -2x
+
+    bull_growth = growth_dec * 1.20  # 20% 상향
+    bear_growth = growth_dec * 0.70  # 30% 하향
+
+    bull_wacc = max(disc_dec - 0.01, 0.04)  # 1%p 하향
+    bear_wacc = disc_dec + 0.01  # 1%p 상향
+
+    bull_perp = min(perp_dec + 0.005, rf_rate)  # 0.5%p 상향 (Rf 이하)
+    bear_perp = max(perp_dec - 0.005, 0.01)  # 0.5%p 하향
+
+    bull_exit = exit_multiple + 2.0  # 2x 상향
+    bear_exit = max(exit_multiple - 2.0, 5.0)  # 2x 하향 (최소 5x)
+
+    def calc_scenario_price(wacc_val, tgr_val, growth_val, exit_mult):
+        """시나리오별 DCF 가치 계산"""
+        if wacc_val <= tgr_val:
+            return None, None
+
+        # FCF 프로젝션
+        pv_sum = 0
+        prev_fcf = base_fcf
+        for i in range(projection_years):
+            if i == 0:
+                fcf_i = base_fcf * (1 + growth_val)
+            else:
+                # Decay 적용 (선형 감소)
+                decay_rate = growth_val - (growth_val - tgr_val) * (i / (projection_years - 1)) if projection_years > 1 else growth_val
+                fcf_i = prev_fcf * (1 + decay_rate)
+            prev_fcf = fcf_i
+            pv_i = fcf_i / ((1 + wacc_val) ** (i + 0.5))  # Mid-year
+            pv_sum += pv_i
+
+        # Terminal Value - Perpetuity
+        tv_perp = prev_fcf * (1 + tgr_val) / (wacc_val - tgr_val)
+        pv_tv_perp = tv_perp / ((1 + wacc_val) ** projection_years)
+
+        # Terminal Value - Exit Multiple
+        ebitda_growth = prev_fcf / base_fcf if base_fcf > 0 else 1
+        final_ebitda = (data.get('ebitda', 0) or 0) * ebitda_growth
+        tv_exit = final_ebitda * exit_mult if final_ebitda > 0 else 0
+        pv_tv_exit = tv_exit / ((1 + wacc_val) ** projection_years)
+
+        # Blended
+        if tv_method == "Perpetuity Growth":
+            pv_tv = pv_tv_perp
+        elif tv_method == "Exit Multiple":
+            pv_tv = pv_tv_exit
+        else:
+            pv_tv = (pv_tv_perp + pv_tv_exit) / 2 if pv_tv_exit > 0 else pv_tv_perp
+
+        ev = pv_sum + pv_tv
+        eq = ev + cash - debt - minority_interest - preferred_stock
+        price = eq / shares if shares > 0 else 0
+
+        upside = (price / current_price - 1) * 100 if current_price > 0 else 0
+        return price, upside
+
+    # 시나리오별 계산
+    bull_price, bull_upside = calc_scenario_price(bull_wacc, bull_perp, bull_growth, bull_exit)
+    base_price, base_upside = dcf_price, mos_pct  # 이미 계산된 값
+    bear_price, bear_upside = calc_scenario_price(bear_wacc, bear_perp, bear_growth, bear_exit)
+
+    # 확률 가중 기대값 (간단한 가중치: Bull 25%, Base 50%, Bear 25%)
+    if bull_price and bear_price:
+        expected_price = bull_price * 0.25 + base_price * 0.50 + bear_price * 0.25
+        expected_upside = (expected_price / current_price - 1) * 100 if current_price > 0 else 0
+    else:
+        expected_price = base_price
+        expected_upside = base_upside
+
+    # 시나리오 테이블
+    scenario_col1, scenario_col2 = st.columns([2, 1])
+
+    with scenario_col1:
+        scenario_data = {
+            'Scenario': ['🐻 Bear', '📊 Base', '🐂 Bull', '⚖️ Expected'],
+            'Growth': [
+                f'{bear_growth*100:.1f}%',
+                f'{growth_dec*100:.1f}%',
+                f'{bull_growth*100:.1f}%',
+                '-'
+            ],
+            'WACC': [
+                f'{bear_wacc*100:.1f}%',
+                f'{disc_dec*100:.1f}%',
+                f'{bull_wacc*100:.1f}%',
+                '-'
+            ],
+            'Fair Value': [
+                f'${bear_price:.2f}' if bear_price else 'N/A',
+                f'${base_price:.2f}',
+                f'${bull_price:.2f}' if bull_price else 'N/A',
+                f'${expected_price:.2f}'
+            ],
+            'Upside': [
+                f'{bear_upside:+.1f}%' if bear_upside else 'N/A',
+                f'{base_upside:+.1f}%',
+                f'{bull_upside:+.1f}%' if bull_upside else 'N/A',
+                f'{expected_upside:+.1f}%'
+            ]
+        }
+        scenario_df = pd.DataFrame(scenario_data)
+        st.dataframe(scenario_df, use_container_width=True, hide_index=True)
+
+    with scenario_col2:
+        # Risk/Reward 비율
+        if bull_price and bear_price and current_price > 0:
+            upside_potential = bull_price - current_price
+            downside_risk = current_price - bear_price
+            risk_reward = upside_potential / downside_risk if downside_risk > 0 else float('inf')
+
+            st.markdown("##### Risk/Reward")
+            if risk_reward > 2:
+                rr_color, rr_label = "#10b981", "Favorable"
+            elif risk_reward > 1:
+                rr_color, rr_label = "#f59e0b", "Balanced"
+            else:
+                rr_color, rr_label = "#ef4444", "Unfavorable"
+
+            st.markdown(f"""
+            <div style="background:{rr_color}20; padding:15px; border-radius:8px; border-left:4px solid {rr_color};">
+                <h2 style="margin:0; color:{rr_color};">{risk_reward:.2f}x</h2>
+                <p style="margin:5px 0 0 0; color:{rr_color};">{rr_label}</p>
+                <hr style="margin:10px 0;">
+                <small>Upside: +${upside_potential:.2f}</small><br>
+                <small>Downside: -${downside_risk:.2f}</small>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.caption("💡 **Expected Value** = Bull(25%) + Base(50%) + Bear(25%) 가중 평균")
 
 # ============================================================
 # TAB 2: Relative Valuation
@@ -1482,18 +1890,19 @@ with tab2:
 with tab3:
     # ===== Risk Scorecard Banner =====
     # WACC 값 가져오기 (Tab 1에서 계산된 값 또는 기본값)
-    wacc_for_risk = st.session_state.get('calculated_wacc', 0.10)  # 기본 10%
-
-    # Earnings Surprise 데이터 가져오기
-    earnings_surprises = get_earnings_history(ticker)
-
-    # Risk Scorecard 생성
-    risk_scorecard = generate_risk_scorecard(
-        ticker=ticker,
-        financial_data=data,
-        wacc=wacc_for_risk,
-        earnings_surprises=earnings_surprises
-    )
+    # Risk Scorecard (Tab 1에서 이미 계산됨, 재사용)
+    if 'risk_scorecard' in st.session_state:
+        risk_scorecard = st.session_state['risk_scorecard']
+    else:
+        # Fallback: Tab 1을 거치지 않은 경우
+        wacc_for_risk = st.session_state.get('calculated_wacc', 0.10)
+        earnings_surprises = get_earnings_history(ticker)
+        risk_scorecard = generate_risk_scorecard(
+            ticker=ticker,
+            financial_data=data,
+            wacc=wacc_for_risk,
+            earnings_surprises=earnings_surprises
+        )
 
     # Risk Level에 따른 색상
     bg_color, text_color = get_risk_color(risk_scorecard.risk_level)

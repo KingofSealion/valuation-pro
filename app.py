@@ -16,7 +16,8 @@ from data_fetcher import (
     get_stock_data as _get_stock_data, get_peers,
     get_peer_group_data as _get_peer_group_data,
     get_historical_valuation as _get_historical_valuation,
-    get_earnings_history as _get_earnings_history
+    get_earnings_history as _get_earnings_history,
+    get_analyst_estimates as _get_analyst_estimates
 )
 from dcf_model import WallStreetDCF
 from risk_model import (
@@ -40,6 +41,10 @@ def get_historical_valuation(ticker: str):
 @st.cache_data(ttl=600, show_spinner=False)
 def get_earnings_history(ticker: str):
     return _get_earnings_history(ticker)
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_analyst_estimates(ticker: str):
+    return _get_analyst_estimates(ticker)
 
 st.set_page_config(page_title="Stock Valuation Pro", page_icon="📊", layout="wide")
 
@@ -1727,67 +1732,136 @@ with tab2:
     # ===== Section 3: Valuation Simulator =====
     st.subheader("🎛️ Valuation Simulator")
 
-    sim_cols = st.columns([2, 1])
+    # Analyst EPS 예상치 가져오기
+    analyst_est = get_analyst_estimates(ticker)
+    fy1_eps_default = analyst_est.get('fy1_eps', 0) or forward_eps
+    fy1_growth = analyst_est.get('fy1_growth', 0) or 0.10
+    num_analysts = analyst_est.get('num_analysts', 0)
 
-    with sim_cols[0]:
-        # PE 슬라이더 범위 설정
-        if 'error' not in hist_val and pe_data.get('low', 0) > 0:
-            pe_min = max(pe_data['low'] * 0.8, 5.0)
-            pe_max = min(pe_data['high'] * 1.2, 100.0)
-            pe_default = pe_data['current'] if pe_data['current'] > 0 else 20.0
-        else:
-            pe_min, pe_max, pe_default = 10.0, 50.0, 20.0
+    # FY2, FY3 기본값 계산
+    fy2_eps_default = fy1_eps_default * (1 + fy1_growth) if fy1_eps_default > 0 else 0
+    fy3_eps_default = fy2_eps_default * (1 + fy1_growth) if fy2_eps_default > 0 else 0
 
-        selected_pe = st.slider(
-            "Target P/E Ratio",
-            min_value=float(pe_min),
-            max_value=float(pe_max),
-            value=float(pe_default),
+    # Target P/E 기본값 (5Y Avg)
+    if 'error' not in hist_val and pe_data.get('avg', 0) > 0:
+        pe_default = pe_data['avg']
+    else:
+        pe_default = 20.0
+
+    # 입력 영역
+    st.markdown(f"**Assumptions** (Analyst: {num_analysts}, Est. Growth: {fy1_growth*100:.1f}%)")
+
+    input_cols = st.columns(4)
+    with input_cols[0]:
+        target_pe = st.number_input(
+            "Target P/E",
+            min_value=5.0,
+            max_value=100.0,
+            value=round(pe_default, 1),
             step=0.5,
-            key="pe_simulator"
+            format="%.1f",
+            key="sim_target_pe"
         )
+        st.caption(f"5Y Avg: {pe_data.get('avg', 0):.1f}x")
 
-        # EPS 선택
-        eps_option = st.radio(
-            "EPS Basis",
-            options=["Trailing EPS", "Forward EPS"],
-            horizontal=True,
-            key="eps_basis"
+    with input_cols[1]:
+        fy1_eps_input = st.number_input(
+            "FY1 EPS ($)",
+            min_value=0.0,
+            max_value=500.0,
+            value=round(fy1_eps_default, 2),
+            step=0.1,
+            format="%.2f",
+            key="sim_fy1_eps"
         )
-        selected_eps = trailing_eps if eps_option == "Trailing EPS" else forward_eps
+        st.caption("Analyst Est.")
 
-    with sim_cols[1]:
-        if selected_eps > 0:
-            simulated_price = selected_pe * selected_eps
-            sim_upside = (simulated_price / current_price - 1) * 100 if current_price > 0 else 0
+    with input_cols[2]:
+        fy2_eps_input = st.number_input(
+            "FY2 EPS ($)",
+            min_value=0.0,
+            max_value=500.0,
+            value=round(fy2_eps_default, 2),
+            step=0.1,
+            format="%.2f",
+            key="sim_fy2_eps"
+        )
+        st.caption("Projected")
 
-            if sim_upside > 15:
-                sim_color = "#22c55e"
-                sim_verdict = "Undervalued"
-            elif sim_upside < -15:
-                sim_color = "#ef4444"
-                sim_verdict = "Overvalued"
-            else:
-                sim_color = "#f59e0b"
-                sim_verdict = "Fair Value"
+    with input_cols[3]:
+        fy3_eps_input = st.number_input(
+            "FY3 EPS ($)",
+            min_value=0.0,
+            max_value=500.0,
+            value=round(fy3_eps_default, 2),
+            step=0.1,
+            format="%.2f",
+            key="sim_fy3_eps"
+        )
+        st.caption("Projected")
 
-            st.markdown(f"""
-            <div style="background: {sim_color}22; padding: 25px; border-radius: 12px;
-                        border: 2px solid {sim_color}; text-align: center;">
-                <div style="font-size: 0.9rem; color: #666;">Implied Price @ {selected_pe:.1f}x P/E</div>
-                <div style="font-size: 2.5rem; font-weight: bold; color: {sim_color}; margin: 10px 0;">
-                    ${simulated_price:.2f}
-                </div>
-                <div style="font-size: 1.1rem; color: {sim_color};">{sim_upside:+.1f}% vs Current</div>
-                <div style="font-size: 0.85rem; color: #666; margin-top: 5px;">
-                    EPS: ${selected_eps:.2f} ({eps_option})
-                </div>
-                <hr style="border-color: {sim_color}44;">
-                <div style="font-size: 1.2rem; font-weight: bold; color: {sim_color};">{sim_verdict}</div>
-            </div>
-            """, unsafe_allow_html=True)
+    # Target Price 계산
+    def calc_upside_color(upside):
+        if upside > 15:
+            return "#22c55e", "▲"
+        elif upside < -15:
+            return "#ef4444", "▼"
         else:
-            st.warning("EPS 데이터 없음")
+            return "#f59e0b", "─"
+
+    fy1_target = target_pe * fy1_eps_input
+    fy2_target = target_pe * fy2_eps_input
+    fy3_target = target_pe * fy3_eps_input
+
+    fy1_upside = (fy1_target / current_price - 1) * 100 if current_price > 0 else 0
+    fy2_upside = (fy2_target / current_price - 1) * 100 if current_price > 0 else 0
+    fy3_upside = (fy3_target / current_price - 1) * 100 if current_price > 0 else 0
+
+    fy1_color, fy1_arrow = calc_upside_color(fy1_upside)
+    fy2_color, fy2_arrow = calc_upside_color(fy2_upside)
+    fy3_color, fy3_arrow = calc_upside_color(fy3_upside)
+
+    # 결과 테이블
+    st.markdown("**Target Price by Year**")
+    st.markdown(f"""
+    <table style="width:100%; border-collapse:collapse; text-align:center; font-size:0.95em;">
+        <thead>
+            <tr style="background:#f8f9fa; border-bottom:2px solid #dee2e6;">
+                <th style="padding:12px;">Year</th>
+                <th style="padding:12px;">EPS</th>
+                <th style="padding:12px;">× P/E</th>
+                <th style="padding:12px;">Target Price</th>
+                <th style="padding:12px;">Upside</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr style="border-bottom:1px solid #dee2e6;">
+                <td style="padding:12px; font-weight:600;">FY1 (1Y)</td>
+                <td style="padding:12px;">${fy1_eps_input:.2f}</td>
+                <td style="padding:12px;">{target_pe:.1f}x</td>
+                <td style="padding:12px; font-weight:600;">${fy1_target:.2f}</td>
+                <td style="padding:12px; color:{fy1_color}; font-weight:600;">{fy1_arrow} {fy1_upside:+.1f}%</td>
+            </tr>
+            <tr style="border-bottom:1px solid #dee2e6;">
+                <td style="padding:12px; font-weight:600;">FY2 (2Y)</td>
+                <td style="padding:12px;">${fy2_eps_input:.2f}</td>
+                <td style="padding:12px;">{target_pe:.1f}x</td>
+                <td style="padding:12px; font-weight:600;">${fy2_target:.2f}</td>
+                <td style="padding:12px; color:{fy2_color}; font-weight:600;">{fy2_arrow} {fy2_upside:+.1f}%</td>
+            </tr>
+            <tr>
+                <td style="padding:12px; font-weight:600;">FY3 (3Y)</td>
+                <td style="padding:12px;">${fy3_eps_input:.2f}</td>
+                <td style="padding:12px;">{target_pe:.1f}x</td>
+                <td style="padding:12px; font-weight:600;">${fy3_target:.2f}</td>
+                <td style="padding:12px; color:{fy3_color}; font-weight:600;">{fy3_arrow} {fy3_upside:+.1f}%</td>
+            </tr>
+        </tbody>
+    </table>
+    <p style="text-align:right; color:#888; font-size:0.8em; margin-top:8px;">
+        Current Price: ${current_price:.2f}
+    </p>
+    """, unsafe_allow_html=True)
 
     st.divider()
 

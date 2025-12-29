@@ -1125,3 +1125,78 @@ def get_revenue_cagr(historical_financials: list, years: int = 3) -> float:
 
     cagr = (end_revenue / start_revenue) ** (1 / n) - 1
     return cagr
+
+
+def get_analyst_estimates(ticker: str) -> dict:
+    """
+    Analyst EPS 예상치 가져오기 (FY0, FY1, 그리고 FY2/FY3 추정)
+
+    Returns:
+        {
+            'fy0_eps': float,  # 현재 회계연도 EPS 예상치
+            'fy1_eps': float,  # 다음 회계연도 EPS 예상치
+            'fy1_growth': float,  # FY0 → FY1 성장률
+            'num_analysts': int,  # 애널리스트 수
+            'trailing_eps': float,  # TTM EPS (참고용)
+            'forward_eps': float,  # Forward EPS (info 기준)
+        }
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+
+        result = {
+            'fy0_eps': 0,
+            'fy1_eps': 0,
+            'fy1_growth': 0,
+            'num_analysts': 0,
+            'trailing_eps': info.get('trailingEps', 0) or 0,
+            'forward_eps': info.get('forwardEps', 0) or 0,
+        }
+
+        # Earnings Estimate 가져오기
+        try:
+            earnings_est = stock.earnings_estimate
+            if earnings_est is not None and not earnings_est.empty:
+                # FY0 (0y)
+                if '0y' in earnings_est.index:
+                    row = earnings_est.loc['0y']
+                    result['fy0_eps'] = float(row['avg']) if pd.notna(row['avg']) else 0
+                    result['num_analysts'] = int(row['numberOfAnalysts']) if pd.notna(row['numberOfAnalysts']) else 0
+
+                # FY1 (+1y)
+                if '+1y' in earnings_est.index:
+                    row = earnings_est.loc['+1y']
+                    result['fy1_eps'] = float(row['avg']) if pd.notna(row['avg']) else 0
+                    result['fy1_growth'] = float(row['growth']) if pd.notna(row['growth']) else 0
+
+                    # num_analysts 업데이트 (더 많은 쪽으로)
+                    if pd.notna(row['numberOfAnalysts']):
+                        result['num_analysts'] = max(result['num_analysts'], int(row['numberOfAnalysts']))
+
+        except Exception:
+            pass
+
+        # FY0가 없으면 forward_eps 사용
+        if result['fy0_eps'] == 0 and result['forward_eps'] > 0:
+            result['fy0_eps'] = result['forward_eps']
+
+        # FY1이 없으면 FY0에 성장률 적용 또는 forward_eps 사용
+        if result['fy1_eps'] == 0:
+            if result['fy0_eps'] > 0 and result['fy1_growth'] > 0:
+                result['fy1_eps'] = result['fy0_eps'] * (1 + result['fy1_growth'])
+            elif result['forward_eps'] > 0:
+                result['fy1_eps'] = result['forward_eps']
+
+        return result
+
+    except Exception as e:
+        return {
+            'fy0_eps': 0,
+            'fy1_eps': 0,
+            'fy1_growth': 0,
+            'num_analysts': 0,
+            'trailing_eps': 0,
+            'forward_eps': 0,
+            'error': str(e)
+        }

@@ -868,28 +868,26 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
                 if equity and shares > 0:
                     bvps_by_year[year] = equity / shares
 
-        # PE 히스토리 계산 (월별 평균)
+        # PE 히스토리 계산 (일별)
         pe_history = []
         pb_history = []
 
-        # 월별로 집계
-        hist['YearMonth'] = hist.index.to_period('M')
-        monthly_prices = hist.groupby('YearMonth')['Close'].mean()
-
-        for ym, avg_price in monthly_prices.items():
-            year = ym.year
-            month = ym.month
+        # 일별 데이터로 계산
+        for date_idx, row in hist.iterrows():
+            close_price = row['Close']
+            year = date_idx.year
+            date_str = date_idx.strftime('%Y-%m-%d')
 
             # 해당 연도의 EPS 사용 (회계연도 기준 근사)
             # 회계연도가 다를 수 있으므로, 해당 연도 또는 이전 연도 EPS 사용
             eps_for_period = eps_by_year.get(year) or eps_by_year.get(year - 1) or eps_by_year.get(year + 1)
 
             if eps_for_period and eps_for_period > 0:
-                pe = avg_price / eps_for_period
+                pe = close_price / eps_for_period
                 if 0 < pe < 200:  # 이상치 제거
                     pe_history.append({
-                        'date': f"{year}-{month:02d}",
-                        'price': float(avg_price),
+                        'date': date_str,
+                        'price': float(close_price),
                         'eps': eps_for_period,
                         'pe': pe
                     })
@@ -897,11 +895,11 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
             # PB 계산
             bvps_for_period = bvps_by_year.get(year) or bvps_by_year.get(year - 1)
             if bvps_for_period and bvps_for_period > 0:
-                pb = avg_price / bvps_for_period
+                pb = close_price / bvps_for_period
                 if 0 < pb < 100:
                     pb_history.append({
-                        'date': f"{year}-{month:02d}",
-                        'price': float(avg_price),
+                        'date': date_str,
+                        'price': float(close_price),
                         'bvps': bvps_for_period,
                         'pb': pb
                     })

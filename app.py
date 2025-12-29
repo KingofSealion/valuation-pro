@@ -905,10 +905,13 @@ with tab1:
     st.divider()
     st.subheader("🔄 What Growth Does the Market Expect?")
 
+    # Reverse DCF용 Terminal Growth (Exit Multiple만 선택한 경우에도 2.5% 사용)
+    reverse_dcf_terminal_growth = perp_dec if tv_method in ["Both", "Perpetuity Growth"] else 0.025
+
     # 가정 명시
     st.caption(f"""
-    **계산 가정**: WACC={disc_dec*100:.1f}%, Terminal Growth={perp_dec*100:.1f}%,
-    Projection={projection_years}Y, Linear Decay 적용, Perpetuity TV 기준
+    **계산 가정**: WACC={disc_dec*100:.1f}%, Terminal Growth={reverse_dcf_terminal_growth*100:.1f}%,
+    Projection={projection_years}Y, Linear Decay, Perpetuity 방식 (Reverse DCF 표준)
     """)
 
     # Reverse DCF: 현재 주가를 정당화하는 '초기 성장률' 역산
@@ -931,7 +934,7 @@ with tab1:
             for i in range(projection_years):
                 # Linear decay: 초기 → Terminal Growth로 점진 감소
                 if projection_years > 1:
-                    year_growth = mid - (mid - perp_dec) * (i / (projection_years - 1))
+                    year_growth = mid - (mid - reverse_dcf_terminal_growth) * (i / (projection_years - 1))
                 else:
                     year_growth = mid
 
@@ -945,7 +948,7 @@ with tab1:
                 pv_sum += pv_i
 
             # Terminal Value (Perpetuity 기준)
-            tv_calc = prev_fcf * (1 + perp_dec) / (disc_dec - perp_dec) if disc_dec > perp_dec else 0
+            tv_calc = prev_fcf * (1 + reverse_dcf_terminal_growth) / (disc_dec - reverse_dcf_terminal_growth) if disc_dec > reverse_dcf_terminal_growth else 0
             pv_tv_calc = tv_calc / ((1 + disc_dec) ** projection_years)
 
             ev_calc = pv_sum + pv_tv_calc
@@ -1001,56 +1004,52 @@ with tab1:
             ig_color = "#10b981"
             ig_desc = "보수적 기대 (저평가 가능성)"
 
-        # UI 표시
-        ig_col1, ig_col2 = st.columns([1, 1])
-
-        with ig_col1:
-            st.markdown(f"""
-            <div style="background:{ig_color}15; padding:20px; border-radius:12px; border-left:4px solid {ig_color};">
-                <h4 style="margin:0; color:#333;">Market Implied Initial Growth</h4>
-                <h1 style="margin:10px 0; color:{ig_color};">{implied_growth*100:.1f}%</h1>
-                <p style="margin:0; color:{ig_color}; font-weight:bold;">{ig_rating}</p>
-                <p style="margin:5px 0 0 0; color:#666; font-size:0.85em;">{ig_desc}</p>
-                <p style="margin:5px 0 0 0; color:#888; font-size:0.75em;">
-                    (Y1: {implied_growth*100:.1f}% → Y{projection_years}: {perp_dec*100:.1f}% decay)
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with ig_col2:
-            # 비교 테이블
-            compare_data = {
-                'Metric': ['Market Expects (Initial)', 'Your DCF Assumption', 'Historical 3Y CAGR'],
-                'Growth Rate': [
-                    f'{implied_growth*100:.1f}%',
-                    f'{growth_dec*100:.1f}%',
-                    f'{hist_cagr*100:.1f}%' if hist_cagr > 0 else 'N/A',
-                ]
-            }
-            st.dataframe(pd.DataFrame(compare_data), use_container_width=True, hide_index=True)
-
-        # 핵심 인사이트 (명확한 해석)
+        # 비교 데이터
         gap = implied_growth - growth_dec  # 양수: 시장이 더 낙관적
-        if gap > 0.05:  # 시장이 5%p 이상 더 높은 성장 기대
-            st.warning(f"""
-            ⚠️ **시장 기대 > 당신의 가정** (Gap: +{gap*100:.1f}%p)
-            - 시장은 {implied_growth*100:.1f}% 성장을 기대하고 현재 가격을 형성
-            - 당신의 가정({growth_dec*100:.1f}%)이 맞다면 → **현재가는 고평가**
-            - 시장 기대치 달성 실패 시 → **주가 하락 리스크**
-            """)
-        elif gap < -0.05:  # 당신이 5%p 이상 더 높은 성장 기대
-            st.success(f"""
-            ✅ **당신의 가정 > 시장 기대** (Gap: {gap*100:.1f}%p)
-            - 시장은 {implied_growth*100:.1f}%만 기대하고 현재 가격을 형성
-            - 당신의 가정({growth_dec*100:.1f}%)이 맞다면 → **현재가는 저평가**
-            - 즉, 당신의 DCF 결과가 현재가보다 높게 나옴
-            """)
+        hist_cagr_str = f"{hist_cagr*100:.1f}%" if hist_cagr > 0 else "N/A"
+
+        # 인사이트 메시지 (영어)
+        if gap > 0.05:
+            insight_msg = "⚠️ Market is more optimistic → If your assumption is correct, <b>Overvalued</b>"
+        elif gap < -0.05:
+            insight_msg = "✅ You are more optimistic → If your assumption is correct, <b>Undervalued</b>"
         else:
-            st.info(f"""
-            ℹ️ **시장 기대 ≈ 당신의 가정** (Gap: {gap*100:+.1f}%p)
-            - 현재 주가는 당신의 DCF 가정과 유사한 성장률을 반영
-            - 즉, **Fair Value 근접**
-            """)
+            insight_msg = "ℹ️ Market ≈ Your assumption → <b>Near Fair Value</b>"
+
+        # 통합 카드 UI
+        st.markdown(f"""
+        <div style="background:{ig_color}15; padding:24px; border-radius:12px; border-left:4px solid {ig_color};">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                <div>
+                    <p style="margin:0; color:#666; font-size:0.9em;">Market Implied Initial Growth</p>
+                    <h1 style="margin:8px 0; color:{ig_color}; font-size:2.5em;">{implied_growth*100:.1f}%</h1>
+                    <p style="margin:0; color:{ig_color}; font-weight:600;">{ig_rating}</p>
+                    <p style="margin:4px 0 0 0; color:#666; font-size:0.85em;">{ig_desc}</p>
+                </div>
+                <div style="text-align:right; color:#888; font-size:0.8em;">
+                    <p style="margin:0;">Y1 → Y{projection_years}</p>
+                    <p style="margin:0;">{implied_growth*100:.1f}% → {reverse_dcf_terminal_growth*100:.1f}%</p>
+                </div>
+            </div>
+            <hr style="border:none; border-top:1px solid {ig_color}40; margin:16px 0;">
+            <div style="display:flex; justify-content:space-around; text-align:center;">
+                <div>
+                    <p style="margin:0; color:#888; font-size:0.75em;">Your DCF</p>
+                    <p style="margin:0; font-weight:600; color:#333;">{growth_dec*100:.1f}%</p>
+                </div>
+                <div style="border-left:1px solid #ddd; border-right:1px solid #ddd; padding:0 20px;">
+                    <p style="margin:0; color:#888; font-size:0.75em;">Historical CAGR</p>
+                    <p style="margin:0; font-weight:600; color:#333;">{hist_cagr_str}</p>
+                </div>
+                <div>
+                    <p style="margin:0; color:#888; font-size:0.75em;">Gap</p>
+                    <p style="margin:0; font-weight:600; color:{ig_color};">{gap*100:+.1f}%p</p>
+                </div>
+            </div>
+            <hr style="border:none; border-top:1px solid {ig_color}40; margin:16px 0;">
+            <p style="margin:0; color:#555; font-size:0.85em;">{insight_msg}</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     else:
         st.warning(f"⚠️ Implied Growth 계산 불가: {status}")
@@ -2131,4 +2130,4 @@ with tab3:
                 """, unsafe_allow_html=True)
 
 st.divider()
-st.caption(f"⚠️ For educational purposes only | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+st.caption(f"⚠️ Sometimes Numbers Lie. Do More Research for Successful Investment. | {datetime.now().strftime('%Y-%m-%d %H:%M')}")

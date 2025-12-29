@@ -35,8 +35,8 @@ def get_peer_group_data(peer_tickers: tuple):
     return _get_peer_group_data(list(peer_tickers))
 
 @st.cache_data(ttl=600, show_spinner=False)
-def get_historical_valuation(ticker: str):
-    return _get_historical_valuation(ticker)
+def get_historical_valuation(ticker: str, years: int = 5):
+    return _get_historical_valuation(ticker, years)
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_earnings_history(ticker: str):
@@ -89,6 +89,13 @@ st.markdown("""
     }
     .premium { color: #ef4444; }
     .discount { color: #10b981; }
+    /* Column height equalization for cards */
+    [data-testid="column"] > div {
+        height: 100%;
+    }
+    [data-testid="column"] > div > div {
+        height: 100%;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -109,6 +116,27 @@ with st.sidebar:
                 # Reset peer data when new stock is loaded
                 if 'peer_data' in st.session_state:
                     del st.session_state['peer_data']
+                # Reset historical valuation cache
+                if 'hist_val' in st.session_state:
+                    del st.session_state['hist_val']
+                if 'hist_val_key' in st.session_state:
+                    del st.session_state['hist_val_key']
+                # Reset Valuation Simulator & Scenario widget values
+                keys_to_reset = [
+                    f"sim_target_pe_{ticker}",
+                    f"sim_fy1_eps_{ticker}",
+                    f"sim_fy2_eps_{ticker}",
+                    f"sim_fy3_eps_{ticker}",
+                    f"scenario_pe_bull_{ticker}",
+                    f"scenario_eps_bull_{ticker}",
+                    f"scenario_pe_base_{ticker}",
+                    f"scenario_eps_base_{ticker}",
+                    f"scenario_pe_bear_{ticker}",
+                    f"scenario_eps_bear_{ticker}",
+                ]
+                for key in keys_to_reset:
+                    if key in st.session_state:
+                        del st.session_state[key]
                 st.success(f"✅ {ticker} loaded!")
             else:
                 st.error(f"Error: {data.get('error', 'Failed')}")
@@ -195,8 +223,8 @@ with tab1:
 
     historical = data.get('historical_financials', [])
 
-    # FCF 데이터 수집
-    all_fcf_data = []
+    # FCF & Revenue 데이터 수집
+    all_financial_data = []
     for h in historical:
         year = h.get('year', '')
         fcf = h.get('fcf', 0)
@@ -204,34 +232,28 @@ with tab1:
             op_cf = h.get('operating_cf', 0)
             capex = h.get('capex', 0)
             fcf = op_cf - capex if op_cf > 0 else 0
-        if fcf != 0:
-            all_fcf_data.append({'year': str(year), 'fcf': fcf})
+        revenue = h.get('revenue', 0)
+        if fcf != 0 or revenue > 0:
+            all_financial_data.append({'year': str(year), 'fcf': fcf, 'revenue': revenue})
 
-    all_fcf_data = sorted(all_fcf_data, key=lambda x: x['year'])
+    all_financial_data = sorted(all_financial_data, key=lambda x: x['year'])
 
-    # TTM FCF
+    # TTM 데이터 추가
     ttm_fcf = data.get('fcf', 0)
+    ttm_revenue = data.get('revenue', 0)
     if ttm_fcf and ttm_fcf != 0:
-        all_fcf_data.append({'year': 'TTM', 'fcf': ttm_fcf})
+        all_financial_data.append({'year': 'TTM', 'fcf': ttm_fcf, 'revenue': ttm_revenue})
 
-    available_years = len(all_fcf_data)
+    available_years = len(all_financial_data)
 
     if available_years == 0:
-        st.error("⚠️ FCF 데이터가 없습니다.")
+        st.error("⚠️ 재무 데이터가 없습니다.")
         st.stop()
 
-    # 기간 선택
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        max_years = min(available_years, 10)
-        year_options = list(range(3, max_years + 1)) if max_years >= 3 else [max_years]
-        selected_years = st.selectbox("Period", options=year_options, index=len(year_options)-1, format_func=lambda x: f"{x}Y", key="dcf_period")
-
-    with col2:
-        years_list = [fd['year'] for fd in all_fcf_data]
-        st.caption(f"💡 Available: {available_years} years ({years_list[0]} ~ {years_list[-1]})")
-
-    fcf_data = all_fcf_data[-selected_years:]
+    # 모든 데이터 사용
+    fcf_data = all_financial_data
+    years_list = [fd['year'] for fd in fcf_data]
+    st.caption(f"💡 {available_years} years ({years_list[0]} ~ {years_list[-1]})")
 
     # DCF 모델 초기화 (성장률 계산에 필요)
     dcf_model = WallStreetDCF(data)
@@ -298,26 +320,45 @@ with tab1:
 
     st.divider()
 
-    # 성장률 계산
-    growth_rates = []
+    # 성장률 계산 (FCF & Revenue)
     for i in range(1, len(fcf_data)):
-        prev = fcf_data[i-1]['fcf']
-        curr = fcf_data[i]['fcf']
-        if prev > 0 and curr > 0:
-            g = (curr - prev) / prev
-            growth_rates.append(g)
-            fcf_data[i]['growth'] = g
+        # FCF Growth
+        prev_fcf = fcf_data[i-1]['fcf']
+        curr_fcf = fcf_data[i]['fcf']
+        if prev_fcf > 0 and curr_fcf > 0:
+            fcf_data[i]['fcf_growth'] = (curr_fcf - prev_fcf) / prev_fcf
         else:
-            fcf_data[i]['growth'] = None
+            fcf_data[i]['fcf_growth'] = None
 
-    # 1. Historical FCF CAGR (복합성장률 - 단순평균보다 안정적)
-    first_fcf = fcf_data[0]['fcf']
-    last_fcf = fcf_data[-1]['fcf']
-    n_years = len(fcf_data) - 1
-    if first_fcf > 0 and last_fcf > 0 and n_years > 0:
-        historical_fcf_cagr = (last_fcf / first_fcf) ** (1 / n_years) - 1
-    else:
-        historical_fcf_cagr = np.mean(growth_rates) if growth_rates else 0.10
+        # Revenue Growth
+        prev_rev = fcf_data[i-1]['revenue']
+        curr_rev = fcf_data[i]['revenue']
+        if prev_rev > 0 and curr_rev > 0:
+            fcf_data[i]['rev_growth'] = (curr_rev - prev_rev) / prev_rev
+        else:
+            fcf_data[i]['rev_growth'] = None
+
+    # CAGR 계산 함수
+    def calc_cagr(data_list, key, years):
+        """최근 n년 CAGR 계산"""
+        if len(data_list) < years + 1:
+            years = len(data_list) - 1
+        if years < 1:
+            return None
+        start_val = data_list[-(years+1)][key]
+        end_val = data_list[-1][key]
+        if start_val > 0 and end_val > 0:
+            return (end_val / start_val) ** (1 / years) - 1
+        return None
+
+    # FCF CAGR (3Y, 5Y)
+    fcf_cagr_3y = calc_cagr(fcf_data, 'fcf', 3)
+    fcf_cagr_5y = calc_cagr(fcf_data, 'fcf', 5)
+    historical_fcf_cagr = fcf_cagr_5y if fcf_cagr_5y else (fcf_cagr_3y or 0.10)
+
+    # Revenue CAGR (3Y, 5Y)
+    rev_cagr_3y = calc_cagr(fcf_data, 'revenue', 3)
+    rev_cagr_5y = calc_cagr(fcf_data, 'revenue', 5)
 
     # 2. Revenue Growth (TTM - DCF에 적합)
     revenue_growth = data.get('revenue_growth', 0) or 0
@@ -328,22 +369,35 @@ with tab1:
 
     avg_growth = historical_fcf_cagr  # 기본값
 
-    # FCF 테이블
-    table_data = {'': ['Year', 'FCF (in thousands)', 'Growth']}
+    # Revenue & FCF 테이블
+    table_data = {
+        '': ['Revenue (M)', 'Rev Growth', 'FCF (M)', 'FCF Growth']
+    }
     for fd in fcf_data:
-        g = fd.get('growth')
-        g_str = f"{g*100:.1f}%" if g is not None else "-"
-        table_data[fd['year']] = [fd['year'], f"{fd['fcf']/1e3:,.0f}", g_str]
+        rev_g = fd.get('rev_growth')
+        fcf_g = fd.get('fcf_growth')
+        rev_g_str = f"{rev_g*100:.1f}%" if rev_g is not None else "-"
+        fcf_g_str = f"{fcf_g*100:.1f}%" if fcf_g is not None else "-"
+        table_data[fd['year']] = [
+            f"{fd['revenue']/1e6:,.0f}" if fd['revenue'] > 0 else "-",
+            rev_g_str,
+            f"{fd['fcf']/1e6:,.0f}" if fd['fcf'] != 0 else "-",
+            fcf_g_str
+        ]
 
     st.dataframe(pd.DataFrame(table_data).set_index('').T, use_container_width=True)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"""
-        <div class="metric-box">
-            <b>Average Growth Rate:</b> <span style="font-size:1.3rem; color:#667eea;">{avg_growth*100:.2f}%</span>
-        </div>
-        """, unsafe_allow_html=True)
+    # CAGR 요약
+    st.markdown("**CAGR Summary**")
+    cagr_cols = st.columns(4)
+    with cagr_cols[0]:
+        st.metric("Revenue 3Y", f"{rev_cagr_3y*100:.1f}%" if rev_cagr_3y else "N/A")
+    with cagr_cols[1]:
+        st.metric("Revenue 5Y", f"{rev_cagr_5y*100:.1f}%" if rev_cagr_5y else "N/A")
+    with cagr_cols[2]:
+        st.metric("FCF 3Y", f"{fcf_cagr_3y*100:.1f}%" if fcf_cagr_3y else "N/A")
+    with cagr_cols[3]:
+        st.metric("FCF 5Y", f"{fcf_cagr_5y*100:.1f}%" if fcf_cagr_5y else "N/A")
 
     base_fcf = fcf_data[-1]['fcf']
     base_year_str = fcf_data[-1]['year']
@@ -844,6 +898,70 @@ with tab1:
         'tv_method': tv_method
     }
 
+    # ===== Implied Market Growth 계산 (DCF 가정 동일 적용) =====
+    def find_implied_growth():
+        """Binary Search로 현재 주가를 정당화하는 초기 성장률 역산"""
+        if current_price <= 0 or shares <= 0:
+            return None
+        target_equity = current_price * shares
+
+        low, high = -0.30, 1.50
+        tolerance = 0.005
+
+        for _ in range(50):
+            mid = (low + high) / 2
+
+            # FCF Projection (사용자 DCF 가정과 동일)
+            pv_sum = 0
+            prev_fcf = base_fcf
+            for i in range(projection_years):
+                if use_decay_schedule and growth_schedule and i < len(growth_schedule):
+                    # Decay 적용: mid를 초기값으로 같은 비율로 decay
+                    ratio = growth_schedule[i] / growth_dec if growth_dec != 0 else 1
+                    year_growth = mid * ratio
+                else:
+                    year_growth = mid
+
+                if i == 0:
+                    fcf_i = base_fcf * (1 + year_growth)
+                else:
+                    fcf_i = prev_fcf * (1 + year_growth)
+                prev_fcf = fcf_i
+                pv_i = fcf_i / ((1 + disc_dec) ** (i + 0.5))
+                pv_sum += pv_i
+
+            # Terminal Value (사용자 TV Method와 동일)
+            if tv_method == "Exit Multiple":
+                # Exit Multiple: EBITDA 기반
+                ebitda_growth = prev_fcf / base_fcf if base_fcf > 0 else 1
+                implied_ebitda = (data.get('ebitda', 0) or 0) * ebitda_growth
+                tv_calc = implied_ebitda * exit_multiple if implied_ebitda > 0 else 0
+            elif tv_method == "Both":
+                # Perpetuity + Exit 평균
+                tv_perp = prev_fcf * (1 + perp_dec) / (disc_dec - perp_dec) if disc_dec > perp_dec else 0
+                ebitda_growth = prev_fcf / base_fcf if base_fcf > 0 else 1
+                implied_ebitda = (data.get('ebitda', 0) or 0) * ebitda_growth
+                tv_exit = implied_ebitda * exit_multiple if implied_ebitda > 0 else 0
+                tv_calc = (tv_perp + tv_exit) / 2 if tv_exit > 0 else tv_perp
+            else:  # Perpetuity Growth
+                tv_calc = prev_fcf * (1 + perp_dec) / (disc_dec - perp_dec) if disc_dec > perp_dec else 0
+
+            pv_tv_calc = tv_calc / ((1 + disc_dec) ** projection_years)
+            ev_calc = pv_sum + pv_tv_calc
+            eq_calc = ev_calc + cash - debt - minority_interest - preferred_stock
+
+            diff_pct = (eq_calc - target_equity) / target_equity if target_equity > 0 else 0
+            if abs(diff_pct) < tolerance:
+                return mid
+            elif eq_calc < target_equity:
+                low = mid
+            else:
+                high = mid
+
+        return mid if abs(diff_pct) < 0.10 else None
+
+    implied_growth = find_implied_growth()
+
     st.divider()
 
     # 결과 표시
@@ -894,6 +1012,12 @@ with tab1:
             st.warning(f"⚠️ Terminal Value = {tv_pct:.0f}% (높음)")
 
     with col2:
+        # Implied Growth 표시 문자열
+        if implied_growth is not None:
+            ig_str = f'<p style="font-size:0.85em; color:#888;">Implied Growth: {implied_growth*100:.1f}%</p>'
+        else:
+            ig_str = '<p style="font-size:0.85em; color:#888;">Implied Growth: N/A</p>'
+
         st.markdown(f"""
         <div class="result-box">
             <h2 style="margin:0;">DCF Fair Value</h2>
@@ -901,163 +1025,11 @@ with tab1:
             <hr>
             <p><b>Current:</b> ${current_price:.2f}</p>
             <p><b>Margin of Safety:</b> <span style="color:{color}; font-weight:bold;">{mos_pct:+.1f}%</span></p>
+            {ig_str}
             <h3 style="color:{color}; margin-top:10px;">{verdict}</h3>
             <p style="font-size:0.85em; color:#6b7280;">{verdict_desc}</p>
         </div>
         """, unsafe_allow_html=True)
-
-    # ===== Market Implied Growth (Reverse DCF) =====
-    st.divider()
-    st.subheader("🔄 What Growth Does the Market Expect?")
-
-    # Reverse DCF용 Terminal Growth (Exit Multiple만 선택한 경우에도 2.5% 사용)
-    reverse_dcf_terminal_growth = perp_dec if tv_method in ["Both", "Perpetuity Growth"] else 0.025
-
-    # 가정 명시
-    st.caption(f"""
-    **계산 가정**: WACC={disc_dec*100:.1f}%, Terminal Growth={reverse_dcf_terminal_growth*100:.1f}%,
-    Projection={projection_years}Y, Linear Decay, Perpetuity 방식 (Reverse DCF 표준)
-    """)
-
-    # Reverse DCF: 현재 주가를 정당화하는 '초기 성장률' 역산
-    def find_implied_initial_growth():
-        """Binary Search로 implied initial growth 찾기 (Linear Decay → Terminal Growth 수렴)"""
-        if current_price <= 0 or shares <= 0:
-            return None, "데이터 부족"
-
-        target_equity = current_price * shares  # 현재 시가총액 = 목표 Equity Value
-
-        low, high = -0.20, 1.50  # -20% ~ 150% 성장률 범위
-        tolerance = 0.005  # 0.5% 허용 오차
-
-        for _ in range(50):
-            mid = (low + high) / 2
-
-            # 이 '초기 성장률'로 DCF 계산 (Linear Decay로 Terminal Growth까지 감소)
-            pv_sum = 0
-            prev_fcf = base_fcf
-            for i in range(projection_years):
-                # Linear decay: 초기 → Terminal Growth로 점진 감소
-                if projection_years > 1:
-                    year_growth = mid - (mid - reverse_dcf_terminal_growth) * (i / (projection_years - 1))
-                else:
-                    year_growth = mid
-
-                if i == 0:
-                    fcf_i = base_fcf * (1 + year_growth)
-                else:
-                    fcf_i = prev_fcf * (1 + year_growth)
-                prev_fcf = fcf_i
-
-                pv_i = fcf_i / ((1 + disc_dec) ** (i + 0.5))  # Mid-year
-                pv_sum += pv_i
-
-            # Terminal Value (Perpetuity 기준)
-            tv_calc = prev_fcf * (1 + reverse_dcf_terminal_growth) / (disc_dec - reverse_dcf_terminal_growth) if disc_dec > reverse_dcf_terminal_growth else 0
-            pv_tv_calc = tv_calc / ((1 + disc_dec) ** projection_years)
-
-            ev_calc = pv_sum + pv_tv_calc
-            eq_calc = ev_calc + cash - debt - minority_interest - preferred_stock
-
-            diff_pct = (eq_calc - target_equity) / target_equity if target_equity > 0 else 0
-
-            if abs(diff_pct) < tolerance:
-                return mid, "found"
-            elif eq_calc < target_equity:
-                low = mid
-            else:
-                high = mid
-
-        # 범위 내에서 찾지 못함
-        if low >= 1.40:
-            return None, "150%+ 성장 필요 (매우 고평가)"
-        elif high <= -0.15:
-            return None, "역성장도 정당화 못함 (저평가)"
-        return mid, "approximate"
-
-    implied_growth, status = find_implied_initial_growth()
-
-    # Historical CAGR 비교용
-    hist = data.get('historical_financials', [])
-    hist_cagr = 0
-    if len(hist) >= 2:
-        revenues = [h.get('revenue', 0) for h in hist if h.get('revenue', 0) > 0]
-        if len(revenues) >= 2:
-            n = min(3, len(revenues) - 1)
-            hist_cagr = (revenues[0] / revenues[n]) ** (1/n) - 1 if revenues[n] > 0 else 0
-
-    if implied_growth is not None:
-        # 시장 기대 평가 (과거 대비)
-        if implied_growth > 0.50:
-            ig_rating = "🔴 Very Aggressive"
-            ig_color = "#ef4444"
-            ig_desc = "시장이 50%+ 성장을 가정 - 매우 낙관적 기대"
-        elif implied_growth > hist_cagr * 1.5 and hist_cagr > 0:
-            ig_rating = "🟠 Aggressive"
-            ig_color = "#f97316"
-            ig_desc = f"과거 CAGR({hist_cagr*100:.1f}%)의 1.5배 이상 기대"
-        elif implied_growth > hist_cagr * 1.1 and hist_cagr > 0:
-            ig_rating = "🟡 Slightly High"
-            ig_color = "#f59e0b"
-            ig_desc = f"과거 CAGR({hist_cagr*100:.1f}%) 약간 상회"
-        elif implied_growth > hist_cagr * 0.7:
-            ig_rating = "🟢 Reasonable"
-            ig_color = "#22c55e"
-            ig_desc = "합리적 기대 (과거 수준)"
-        else:
-            ig_rating = "🟢 Conservative"
-            ig_color = "#10b981"
-            ig_desc = "보수적 기대 (저평가 가능성)"
-
-        # 비교 데이터
-        gap = implied_growth - growth_dec  # 양수: 시장이 더 낙관적
-        hist_cagr_str = f"{hist_cagr*100:.1f}%" if hist_cagr > 0 else "N/A"
-
-        # 인사이트 메시지 (영어)
-        if gap > 0.05:
-            insight_msg = "⚠️ Market is more optimistic → If your assumption is correct, <b>Overvalued</b>"
-        elif gap < -0.05:
-            insight_msg = "✅ You are more optimistic → If your assumption is correct, <b>Undervalued</b>"
-        else:
-            insight_msg = "ℹ️ Market ≈ Your assumption → <b>Near Fair Value</b>"
-
-        # 통합 카드 UI
-        st.markdown(f"""
-        <div style="background:{ig_color}15; padding:24px; border-radius:12px; border-left:4px solid {ig_color};">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                <div>
-                    <p style="margin:0; color:#666; font-size:0.9em;">Market Implied Initial Growth</p>
-                    <h1 style="margin:8px 0; color:{ig_color}; font-size:2.5em;">{implied_growth*100:.1f}%</h1>
-                    <p style="margin:0; color:{ig_color}; font-weight:600;">{ig_rating}</p>
-                    <p style="margin:4px 0 0 0; color:#666; font-size:0.85em;">{ig_desc}</p>
-                </div>
-                <div style="text-align:right; color:#888; font-size:0.8em;">
-                    <p style="margin:0;">Y1 → Y{projection_years}</p>
-                    <p style="margin:0;">{implied_growth*100:.1f}% → {reverse_dcf_terminal_growth*100:.1f}%</p>
-                </div>
-            </div>
-            <hr style="border:none; border-top:1px solid {ig_color}40; margin:16px 0;">
-            <div style="display:flex; justify-content:space-around; text-align:center;">
-                <div>
-                    <p style="margin:0; color:#888; font-size:0.75em;">Your DCF</p>
-                    <p style="margin:0; font-weight:600; color:#333;">{growth_dec*100:.1f}%</p>
-                </div>
-                <div style="border-left:1px solid #ddd; border-right:1px solid #ddd; padding:0 20px;">
-                    <p style="margin:0; color:#888; font-size:0.75em;">Historical CAGR</p>
-                    <p style="margin:0; font-weight:600; color:#333;">{hist_cagr_str}</p>
-                </div>
-                <div>
-                    <p style="margin:0; color:#888; font-size:0.75em;">Gap</p>
-                    <p style="margin:0; font-weight:600; color:{ig_color};">{gap*100:+.1f}%p</p>
-                </div>
-            </div>
-            <hr style="border:none; border-top:1px solid {ig_color}40; margin:16px 0;">
-            <p style="margin:0; color:#555; font-size:0.85em;">{insight_msg}</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    else:
-        st.warning(f"⚠️ Implied Growth 계산 불가: {status}")
 
     # ===== Sensitivity Analysis =====
     st.divider()
@@ -1330,14 +1302,25 @@ with tab2:
     forward_eps = data.get('forward_eps', 0)
 
     # ===== Section 1: Historical Valuation =====
-    st.subheader("📊 Historical Valuation (vs Own History)")
+    hist_header_col1, hist_header_col2 = st.columns([3, 1])
+    with hist_header_col1:
+        st.subheader("📊 Historical Valuation")
+    with hist_header_col2:
+        hist_period = st.selectbox(
+            "Period",
+            options=[5, 3],
+            format_func=lambda x: f"{x}Y",
+            key="hist_val_period",
+            label_visibility="collapsed"
+        )
 
-    # Historical 데이터 가져오기
-    if 'hist_val' not in st.session_state or st.session_state.get('hist_val_ticker') != ticker:
+    # Historical 데이터 가져오기 (period 포함)
+    hist_val_key = f"{ticker}_{hist_period}"
+    if 'hist_val' not in st.session_state or st.session_state.get('hist_val_key') != hist_val_key:
         with st.spinner("Loading historical valuation data..."):
-            hist_val = get_historical_valuation(ticker)
+            hist_val = get_historical_valuation(ticker, hist_period)
             st.session_state['hist_val'] = hist_val
-            st.session_state['hist_val_ticker'] = ticker
+            st.session_state['hist_val_key'] = hist_val_key
     else:
         hist_val = st.session_state['hist_val']
 
@@ -1377,8 +1360,8 @@ with tab2:
 
             st.markdown(f"""
             <div style="background: linear-gradient(135deg, rgba(102,126,234,0.1), rgba(118,75,162,0.1));
-                        padding: 20px; border-radius: 12px; border-left: 5px solid #667eea;">
-                <h4 style="margin:0 0 15px 0;">P/E Ratio Band (5Y)</h4>
+                        padding: 20px; border-radius: 12px; border-left: 5px solid #667eea; height: 100%;">
+                <h4 style="margin:0 0 15px 0;">P/E Ratio Band ({hist_period}Y)</h4>
                 <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
                     <span>Low: <b>{pe_data['low']:.1f}x</b></span>
                     <span>Avg: <b>{pe_data['avg']:.1f}x</b></span>
@@ -1415,8 +1398,8 @@ with tab2:
 
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, rgba(16,185,129,0.1), rgba(5,150,105,0.1));
-                            padding: 20px; border-radius: 12px; border-left: 5px solid #10b981;">
-                    <h4 style="margin:0 0 15px 0;">Forward vs Trailing P/E</h4>
+                            padding: 20px; border-radius: 12px; border-left: 5px solid #10b981; height: 100%;">
+                    <h4 style="margin:0 0 15px 0;">Trailing vs Forward P/E</h4>
                     <div style="display: flex; justify-content: space-around; text-align: center;">
                         <div>
                             <div style="font-size: 0.85rem; color: #666;">Trailing P/E</div>
@@ -1429,7 +1412,7 @@ with tab2:
                         </div>
                     </div>
                     <div style="text-align: center; margin-top: 15px;">
-                        <span style="color: {fwd_color}; font-size: 0.9rem;">{fwd_msg} ({fwd_vs_trailing:+.1f}%)</span>
+                        <span style="color: {fwd_color}; font-size: 0.9rem;">{fwd_msg}<br>({fwd_vs_trailing:+.1f}%)</span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -1477,7 +1460,7 @@ with tab2:
 
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, rgba(168,85,247,0.1), rgba(139,92,246,0.1));
-                            padding: 20px; border-radius: 12px; border-left: 5px solid #a855f7;">
+                            padding: 20px; border-radius: 12px; border-left: 5px solid #a855f7; height: 100%;">
                     <h4 style="margin:0 0 15px 0;">PEG Ratio Analysis</h4>
                     <div style="text-align: center;">
                         <div style="font-size: 2.5rem; font-weight: bold; color: {peg_color};">{peg_ratio:.2f}x</div>
@@ -1487,9 +1470,6 @@ with tab2:
                         <div style="font-size: 0.8rem; color: #666; text-align: center;">
                             <span style="color: {insight_color}; font-weight: 500;">{insight_msg}</span>
                         </div>
-                    </div>
-                    <div style="font-size: 0.75rem; color: #888; margin-top: 10px; text-align: center;">
-                        PEG &lt;1 = Growth at Reasonable Price
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -1501,7 +1481,7 @@ with tab2:
                     reason = "P/E data unavailable"
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, rgba(168,85,247,0.1), rgba(139,92,246,0.1));
-                            padding: 20px; border-radius: 12px; border-left: 5px solid #a855f7;">
+                            padding: 20px; border-radius: 12px; border-left: 5px solid #a855f7; height: 100%;">
                     <h4 style="margin:0 0 15px 0;">PEG Ratio Analysis</h4>
                     <div style="text-align: center; padding: 20px 0;">
                         <div style="font-size: 1.2rem; color: #888;">N/A</div>
@@ -1510,9 +1490,11 @@ with tab2:
                 </div>
                 """, unsafe_allow_html=True)
 
-        # PE Band Chart
+        st.write("")  # 간격 추가
+
+        # PE Band Chart (Trailing P/E only)
         if pe_data['history']:
-            with st.expander("📈 P/E Trend Chart (5Y)", expanded=False):
+            with st.expander(f"📈 P/E Trend Chart ({hist_period}Y)", expanded=False):
                 dates = [p['date'] for p in pe_data['history']]
                 pe_values = [p['pe'] for p in pe_data['history']]
 
@@ -1520,20 +1502,20 @@ with tab2:
                 fig_pe.add_trace(go.Scatter(
                     x=dates, y=pe_values,
                     mode='lines',
-                    name='P/E',
+                    name='Trailing P/E',
                     line=dict(color='#667eea', width=2),
                     fill='tozeroy',
                     fillcolor='rgba(102, 126, 234, 0.1)'
                 ))
                 # Average line
                 fig_pe.add_hline(y=pe_data['avg'], line_dash="dash", line_color="#f59e0b",
-                                annotation_text=f"5Y Avg: {pe_data['avg']:.1f}x")
+                                annotation_text=f"{hist_period}Y Avg: {pe_data['avg']:.1f}x")
                 # Current marker
                 fig_pe.add_hline(y=pe_data['current'], line_dash="dot", line_color="#22c55e",
                                 annotation_text=f"Current: {pe_data['current']:.1f}x", annotation_position="bottom right")
 
                 fig_pe.update_layout(
-                    title=f"{ticker} Historical P/E Ratio",
+                    title=f"{ticker} Historical Trailing P/E",
                     xaxis_title="",
                     yaxis_title="P/E Ratio",
                     height=300,
@@ -1541,37 +1523,6 @@ with tab2:
                     showlegend=False
                 )
                 st.plotly_chart(fig_pe, use_container_width=True)
-
-        # Historical 기반 Implied Price
-        st.markdown("**Historical P/E Based Valuation**")
-        hist_cols = st.columns(5)
-        with hist_cols[0]:
-            if pe_data['avg'] > 0 and trailing_eps > 0:
-                hist_avg_price = pe_data['avg'] * trailing_eps
-                hist_avg_upside = (hist_avg_price / current_price - 1) * 100 if current_price > 0 else 0
-                st.metric("@ 5Y Avg P/E", f"${hist_avg_price:.2f}", f"{hist_avg_upside:+.1f}%")
-        with hist_cols[1]:
-            if pe_data['low'] > 0 and trailing_eps > 0:
-                hist_low_price = pe_data['low'] * trailing_eps
-                st.metric("@ 5Y Low P/E", f"${hist_low_price:.2f}", "Bear Case")
-        with hist_cols[2]:
-            if pe_data['high'] > 0 and trailing_eps > 0:
-                hist_high_price = pe_data['high'] * trailing_eps
-                st.metric("@ 5Y High P/E", f"${hist_high_price:.2f}", "Bull Case")
-        with hist_cols[3]:
-            if forward_eps > 0 and pe_data['avg'] > 0:
-                fwd_fair_price = pe_data['avg'] * forward_eps
-                fwd_upside = (fwd_fair_price / current_price - 1) * 100 if current_price > 0 else 0
-                st.metric("@ Fwd EPS + Avg P/E", f"${fwd_fair_price:.2f}", f"{fwd_upside:+.1f}%")
-        with hist_cols[4]:
-            # PEG = 1 기준 Fair Value (P/E = EPS Growth %)
-            if eps_growth_rate > 0 and trailing_eps > 0:
-                peg_fair_pe = eps_growth_rate  # PEG = 1이면 P/E = Growth Rate
-                peg_fair_price = peg_fair_pe * trailing_eps
-                peg_upside = (peg_fair_price / current_price - 1) * 100 if current_price > 0 else 0
-                st.metric("@ PEG = 1", f"${peg_fair_price:.2f}", f"{peg_upside:+.1f}%")
-            else:
-                st.metric("@ PEG = 1", "N/A", "No growth data")
 
         # PEG 인사이트 박스
         if peg_ratio is not None:
@@ -1731,10 +1682,13 @@ with tab2:
 
     # ===== Section 3: Valuation Simulator =====
     st.subheader("🎛️ Valuation Simulator")
+    st.caption("💡 Target Price = Target P/E × Forward EPS (주가는 미래 실적을 반영)")
 
     # Analyst EPS 예상치 가져오기
     analyst_est = get_analyst_estimates(ticker)
     fy1_eps_default = analyst_est.get('fy1_eps', 0) or forward_eps
+    fy1_eps_low = analyst_est.get('fy1_eps_low', 0)
+    fy1_eps_high = analyst_est.get('fy1_eps_high', 0)
     fy1_growth = analyst_est.get('fy1_growth', 0) or 0.10
     num_analysts = analyst_est.get('num_analysts', 0)
 
@@ -1742,14 +1696,11 @@ with tab2:
     fy2_eps_default = fy1_eps_default * (1 + fy1_growth) if fy1_eps_default > 0 else 0
     fy3_eps_default = fy2_eps_default * (1 + fy1_growth) if fy2_eps_default > 0 else 0
 
-    # Target P/E 기본값 (5Y Avg)
-    if 'error' not in hist_val and pe_data.get('avg', 0) > 0:
-        pe_default = pe_data['avg']
-    else:
-        pe_default = 20.0
+    # Target P/E 기본값: Historical Average (단순화)
+    pe_default = pe_data.get('avg', 0) or fwd_pe_data.get('current', 0) or 20.0
 
     # P/E max_value 동적 설정 (기본값보다 높으면 여유 있게)
-    pe_max = max(200.0, pe_default * 1.5)
+    pe_max = max(200.0, pe_default * 2.0)
 
     # 입력 영역
     st.markdown(f"**Assumptions** (Analyst: {num_analysts}, Est. Growth: {fy1_growth*100:.1f}%)")
@@ -1763,9 +1714,10 @@ with tab2:
             value=round(pe_default, 1),
             step=0.5,
             format="%.1f",
-            key="sim_target_pe"
+            key=f"sim_target_pe_{ticker}"
         )
-        st.caption(f"5Y Avg: {pe_data.get('avg', 0):.1f}x")
+        st.caption(f"**Default:** Hist {hist_period}Y Avg ({pe_data['avg']:.1f}x)")
+        st.caption(f"Current: {fwd_pe_data['current']:.1f}x (Fwd) | {pe_data['current']:.1f}x (TTM)")
 
     with input_cols[1]:
         fy1_eps_input = st.number_input(
@@ -1775,9 +1727,13 @@ with tab2:
             value=round(fy1_eps_default, 2),
             step=0.1,
             format="%.2f",
-            key="sim_fy1_eps"
+            key=f"sim_fy1_eps_{ticker}"
         )
-        st.caption("Analyst Est.")
+        # Analyst Est. 캡션 (Bull / Base / Bear)
+        if fy1_eps_low > 0 and fy1_eps_high > 0:
+            st.caption(f"Analyst: \\${fy1_eps_high:.2f}(Bull), \\${fy1_eps_default:.2f}(Base), \\${fy1_eps_low:.2f}(Bear)")
+        else:
+            st.caption(f"Analyst: \\${fy1_eps_default:.2f}")
 
     with input_cols[2]:
         fy2_eps_input = st.number_input(
@@ -1787,7 +1743,7 @@ with tab2:
             value=round(fy2_eps_default, 2),
             step=0.1,
             format="%.2f",
-            key="sim_fy2_eps"
+            key=f"sim_fy2_eps_{ticker}"
         )
         st.caption("Projected")
 
@@ -1799,7 +1755,7 @@ with tab2:
             value=round(fy3_eps_default, 2),
             step=0.1,
             format="%.2f",
-            key="sim_fy3_eps"
+            key=f"sim_fy3_eps_{ticker}"
         )
         st.caption("Projected")
 
@@ -1871,97 +1827,70 @@ with tab2:
 
     st.divider()
 
-    # ===== Section 4: Fair Value Summary =====
-    st.subheader("💰 Relative Valuation Summary")
+    # ===== Section 4: Bull / Base / Bear Scenarios =====
+    st.subheader("🎯 Bull / Base / Bear Scenarios")
 
-    summary_data = []
+    # PE 기본값: Historical Percentile 기반 (p75 / avg / p25)
+    pe_bull_default = pe_data.get('p75', 0) or pe_data.get('avg', 20) * 1.15
+    pe_base_default = pe_data.get('avg', 0) or 20.0
+    pe_bear_default = pe_data.get('p25', 0) or pe_data.get('avg', 20) * 0.85
 
-    # 1. Historical PE 기반
-    if 'error' not in hist_val and pe_data.get('avg', 0) > 0 and trailing_eps > 0:
-        hist_fair = pe_data['avg'] * trailing_eps
-        summary_data.append({
-            'Method': 'Historical 5Y Avg P/E',
-            'Multiple': f"{pe_data['avg']:.1f}x",
-            'Fair Value': hist_fair,
-            'Upside': (hist_fair / current_price - 1) * 100 if current_price > 0 else 0
-        })
+    # EPS 기본값 (Base = Analyst Avg, Bull = High, Bear = Low)
+    eps_base_default = analyst_est.get('fy1_eps', 0) or forward_eps
+    eps_bull_default = analyst_est.get('fy1_eps_high', 0) or eps_base_default
+    eps_bear_default = analyst_est.get('fy1_eps_low', 0) or eps_base_default
 
-    # 2. Peer PE 기반
-    if 'peer_result' in st.session_state and st.session_state['peer_result'].get('peer_fair_value', 0) > 0:
-        peer_fair = st.session_state['peer_result']['peer_fair_value']
-        peer_pe = st.session_state['peer_result']['peer_avg_pe']
-        summary_data.append({
-            'Method': 'Peer Avg P/E',
-            'Multiple': f"{peer_pe:.1f}x",
-            'Fair Value': peer_fair,
-            'Upside': (peer_fair / current_price - 1) * 100 if current_price > 0 else 0
-        })
+    # fallback: high/low가 0이면 base에서 ±10% 적용
+    if eps_bull_default <= eps_base_default:
+        eps_bull_default = eps_base_default * 1.10
+    if eps_bear_default <= 0 or eps_bear_default >= eps_base_default:
+        eps_bear_default = eps_base_default * 0.90
 
-    # 3. Forward PE 기반
-    if forward_eps > 0 and pe_data.get('avg', 0) > 0:
-        fwd_fair = pe_data['avg'] * forward_eps
-        summary_data.append({
-            'Method': 'Forward EPS @ Hist Avg P/E',
-            'Multiple': f"{pe_data['avg']:.1f}x",
-            'Fair Value': fwd_fair,
-            'Upside': (fwd_fair / current_price - 1) * 100 if current_price > 0 else 0
-        })
+    if pe_base_default > 0 and eps_base_default > 0:
+        # 캡션: 기본값 설명
+        st.caption(f"💡 P/E 기본값 (Hist {hist_period}Y): Bull={pe_bull_default:.1f}x (상위 25%), Base={pe_base_default:.1f}x (avg), Bear={pe_bear_default:.1f}x (하위 25%)")
+        st.caption(f"💡 EPS 기본값 (FY1 Analyst): Bull=\\${eps_bull_default:.2f} (High), Base=\\${eps_base_default:.2f} (Avg), Bear=\\${eps_bear_default:.2f} (Low)")
 
-    # 4. PEG = 1 기반 Fair Value
-    # PEG = 1이면 P/E = EPS Growth Rate가 되어야 함
-    if trailing_eps > 0 and forward_eps > 0:
-        eps_growth_pct = ((forward_eps - trailing_eps) / trailing_eps) * 100
+        # 입력 UI - 상단에 6개 컬럼으로 배치
+        input_cols = st.columns(6)
+        with input_cols[0]:
+            pe_bull = st.number_input("🐂 Bull P/E", min_value=1.0, max_value=500.0, value=round(pe_bull_default, 1), step=0.5, format="%.1f", key=f"scenario_pe_bull_{ticker}")
+        with input_cols[1]:
+            eps_bull = st.number_input("🐂 Bull EPS", min_value=0.0, max_value=500.0, value=round(eps_bull_default, 2), step=0.1, format="%.2f", key=f"scenario_eps_bull_{ticker}")
+        with input_cols[2]:
+            pe_base = st.number_input("📊 Base P/E", min_value=1.0, max_value=500.0, value=round(pe_base_default, 1), step=0.5, format="%.1f", key=f"scenario_pe_base_{ticker}")
+        with input_cols[3]:
+            eps_base = st.number_input("📊 Base EPS", min_value=0.0, max_value=500.0, value=round(eps_base_default, 2), step=0.1, format="%.2f", key=f"scenario_eps_base_{ticker}")
+        with input_cols[4]:
+            pe_bear = st.number_input("🐻 Bear P/E", min_value=1.0, max_value=500.0, value=round(pe_bear_default, 1), step=0.5, format="%.1f", key=f"scenario_pe_bear_{ticker}")
+        with input_cols[5]:
+            eps_bear = st.number_input("🐻 Bear EPS", min_value=0.0, max_value=500.0, value=round(eps_bear_default, 2), step=0.1, format="%.2f", key=f"scenario_eps_bear_{ticker}")
+
+        # 계산
+        bull_price = pe_bull * eps_bull
+        base_price = pe_base * eps_base
+        bear_price = pe_bear * eps_bear
+
+        bull_upside = (bull_price / current_price - 1) * 100 if current_price > 0 else 0
+        base_upside = (base_price / current_price - 1) * 100 if current_price > 0 else 0
+        bear_upside = (bear_price / current_price - 1) * 100 if current_price > 0 else 0
+
+        # 결과 테이블
+        st.markdown("---")
+        scenario_data = {
+            'Scenario': ['🐂 Bull', '📊 Base', '🐻 Bear'],
+            'P/E': [f'{pe_bull:.1f}x', f'{pe_base:.1f}x', f'{pe_bear:.1f}x'],
+            'EPS': [f'${eps_bull:.2f}', f'${eps_base:.2f}', f'${eps_bear:.2f}'],
+            'Target Price': [f'${bull_price:.2f}', f'${base_price:.2f}', f'${bear_price:.2f}'],
+            'Upside': [f'{bull_upside:+.1f}%', f'{base_upside:+.1f}%', f'{bear_upside:+.1f}%']
+        }
+        scenario_df = pd.DataFrame(scenario_data)
+        st.dataframe(scenario_df, use_container_width=True, hide_index=True)
+
+        # Base case를 relative_fair_value로 저장 (Summary 탭용)
+        st.session_state['relative_fair_value'] = base_price
     else:
-        eps_growth_pct = (data.get('earnings_growth', 0) or 0)
-        if eps_growth_pct and eps_growth_pct < 1:  # 소수 형태인 경우
-            eps_growth_pct = eps_growth_pct * 100
-
-    if eps_growth_pct > 0 and trailing_eps > 0:
-        peg_fair_value = eps_growth_pct * trailing_eps  # PEG = 1 means P/E = Growth %
-        summary_data.append({
-            'Method': 'PEG = 1 (GARP)',
-            'Multiple': f"{eps_growth_pct:.1f}x P/E",
-            'Fair Value': peg_fair_value,
-            'Upside': (peg_fair_value / current_price - 1) * 100 if current_price > 0 else 0
-        })
-
-    if summary_data:
-        summary_df = pd.DataFrame(summary_data)
-        summary_df['Fair Value'] = summary_df['Fair Value'].apply(lambda x: f"${x:.2f}")
-        summary_df['Upside'] = summary_df['Upside'].apply(lambda x: f"{x:+.1f}%")
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-        # 평균 Fair Value
-        avg_fair = sum([d['Fair Value'] if isinstance(d['Fair Value'], float) else float(d['Fair Value'].replace('$', '').replace(',', '')) for d in summary_data]) / len(summary_data) if summary_data else 0
-        # 다시 계산
-        fair_values = []
-        if 'error' not in hist_val and pe_data.get('avg', 0) > 0 and trailing_eps > 0:
-            fair_values.append(pe_data['avg'] * trailing_eps)
-        if 'peer_result' in st.session_state and st.session_state['peer_result'].get('peer_fair_value', 0) > 0:
-            fair_values.append(st.session_state['peer_result']['peer_fair_value'])
-        # PEG = 1 기반 Fair Value 추가
-        if eps_growth_pct > 0 and trailing_eps > 0:
-            fair_values.append(eps_growth_pct * trailing_eps)
-
-        if fair_values:
-            avg_relative_fair = sum(fair_values) / len(fair_values)
-            st.session_state['relative_fair_value'] = avg_relative_fair
-
-            avg_upside = (avg_relative_fair / current_price - 1) * 100 if current_price > 0 else 0
-            st.markdown(f"""
-            <div style="background: linear-gradient(90deg, #667eea22, #764ba222);
-                        padding: 15px 20px; border-radius: 10px; text-align: center; margin-top: 10px;">
-                <span style="font-size: 1rem;">📊 Average Relative Fair Value:</span>
-                <span style="font-size: 1.5rem; font-weight: bold; color: #667eea; margin-left: 10px;">
-                    ${avg_relative_fair:.2f}
-                </span>
-                <span style="font-size: 1rem; color: {'#22c55e' if avg_upside > 0 else '#ef4444'}; margin-left: 10px;">
-                    ({avg_upside:+.1f}%)
-                </span>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("Fair Value 계산을 위한 데이터가 부족합니다. Peer 데이터를 로드해주세요.")
+        st.info("시나리오 계산을 위한 데이터가 부족합니다.")
 
 # ============================================================
 # TAB 3: Summary (Football Field Chart)
@@ -2093,19 +2022,19 @@ with tab3:
             'color': '#10b981'
         })
 
-    # 4. Peer Comparison 결과 (Tab 2에서)
-    if 'peer_result' in st.session_state and st.session_state['peer_result']['peer_fair_value'] > 0:
-        peer_price = st.session_state['peer_result']['peer_fair_value']
+    # 4. Relative Valuation 결과 (Tab 2 Bull/Base/Bear에서)
+    if 'relative_fair_value' in st.session_state and st.session_state['relative_fair_value'] > 0:
+        rel_price = st.session_state['relative_fair_value']
         valuation_ranges.append({
-            'category': 'Peer-Based (P/E)',
-            'low': peer_price * 0.9,
-            'mid': peer_price,
-            'high': peer_price * 1.1,
+            'category': 'Relative Valuation',
+            'low': rel_price * 0.85,
+            'mid': rel_price,
+            'high': rel_price * 1.15,
             'color': '#f59e0b'
         })
 
     if not valuation_ranges:
-        st.warning("⚠️ 먼저 Tab 1 (DCF)와 Tab 2 (Peer)를 완료해주세요.")
+        st.warning("⚠️ 먼저 Tab 1 (DCF)와 Tab 2 (Relative Valuation)를 완료해주세요.")
         st.stop()
 
     # Football Field Chart

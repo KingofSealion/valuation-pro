@@ -884,9 +884,18 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
                     break
             return result_bvps
 
+        def find_forward_eps_for_date(price_date, eps_list):
+            """주가 날짜에 해당하는 Forward EPS 반환 (다음 회계연도 EPS)"""
+            for fy_end_date, eps_val in eps_list:
+                # 회계연도 종료일이 주가 날짜보다 이후이면 = Forward EPS
+                if fy_end_date.tz_localize(None) > price_date.tz_localize(None):
+                    return eps_val
+            return None
+
         # PE 히스토리 계산 (일별)
         pe_history = []
         pb_history = []
+        forward_pe_history = []
 
         # 일별 데이터로 계산
         for date_idx, row in hist.iterrows():
@@ -904,6 +913,18 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
                         'price': float(close_price),
                         'eps': eps_for_period,
                         'pe': pe
+                    })
+
+            # Forward PE 계산 (다음 회계연도 EPS 사용)
+            forward_eps_for_period = find_forward_eps_for_date(date_idx, eps_list)
+            if forward_eps_for_period and forward_eps_for_period > 0:
+                fwd_pe = close_price / forward_eps_for_period
+                if 0 < fwd_pe < 500:
+                    forward_pe_history.append({
+                        'date': date_str,
+                        'price': float(close_price),
+                        'forward_eps': forward_eps_for_period,
+                        'forward_pe': fwd_pe
                     })
 
             # PB 계산
@@ -925,6 +946,12 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
             pe_high = max(pe_values)
             pe_low = min(pe_values)
 
+            # 25th / 75th Percentile 계산 (Bull/Bear 시나리오용)
+            sorted_pe = sorted(pe_values)
+            n = len(sorted_pe)
+            pe_25 = sorted_pe[int(n * 0.25)] if n > 0 else pe_avg
+            pe_75 = sorted_pe[int(n * 0.75)] if n > 0 else pe_avg
+
             # Percentile 계산 (현재 PE가 과거 대비 몇 %ile인지)
             if current_pe > 0:
                 below_count = sum(1 for p in pe_values if p < current_pe)
@@ -937,12 +964,14 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
                 'avg': pe_avg,
                 'high': pe_high,
                 'low': pe_low,
+                'p25': pe_25,
+                'p75': pe_75,
                 'percentile': pe_percentile,
                 'vs_avg_pct': ((current_pe / pe_avg) - 1) * 100 if pe_avg > 0 else 0,
                 'history': pe_history
             }
         else:
-            pe_result = {'current': current_pe, 'avg': 0, 'high': 0, 'low': 0, 'percentile': 50, 'vs_avg_pct': 0, 'history': []}
+            pe_result = {'current': current_pe, 'avg': 0, 'high': 0, 'low': 0, 'p25': 0, 'p75': 0, 'percentile': 50, 'vs_avg_pct': 0, 'history': []}
 
         # PB 통계
         if pb_history:
@@ -969,11 +998,51 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
         else:
             pb_result = {'current': current_pb, 'avg': 0, 'high': 0, 'low': 0, 'percentile': 50, 'vs_avg_pct': 0, 'history': []}
 
-        # Forward PE (현재만)
-        forward_pe_result = {
-            'current': current_forward_pe,
-            'vs_trailing': ((current_forward_pe / current_pe) - 1) * 100 if current_pe > 0 and current_forward_pe > 0 else 0
-        }
+        # Forward PE 통계
+        if forward_pe_history:
+            fwd_pe_values = [p['forward_pe'] for p in forward_pe_history]
+            fwd_pe_avg = sum(fwd_pe_values) / len(fwd_pe_values)
+            fwd_pe_high = max(fwd_pe_values)
+            fwd_pe_low = min(fwd_pe_values)
+
+            # 25th / 75th Percentile 계산
+            sorted_fwd_pe = sorted(fwd_pe_values)
+            n = len(sorted_fwd_pe)
+            fwd_pe_25 = sorted_fwd_pe[int(n * 0.25)] if n > 0 else fwd_pe_avg
+            fwd_pe_75 = sorted_fwd_pe[int(n * 0.75)] if n > 0 else fwd_pe_avg
+
+            # Percentile 계산 (현재 Forward PE가 과거 대비 몇 %ile인지)
+            if current_forward_pe > 0:
+                below_count = sum(1 for p in fwd_pe_values if p < current_forward_pe)
+                fwd_pe_percentile = (below_count / len(fwd_pe_values)) * 100
+            else:
+                fwd_pe_percentile = 50
+
+            forward_pe_result = {
+                'current': current_forward_pe,
+                'avg': fwd_pe_avg,
+                'high': fwd_pe_high,
+                'low': fwd_pe_low,
+                'p25': fwd_pe_25,
+                'p75': fwd_pe_75,
+                'percentile': fwd_pe_percentile,
+                'vs_avg_pct': ((current_forward_pe / fwd_pe_avg) - 1) * 100 if fwd_pe_avg > 0 and current_forward_pe > 0 else 0,
+                'vs_trailing': ((current_forward_pe / current_pe) - 1) * 100 if current_pe > 0 and current_forward_pe > 0 else 0,
+                'history': forward_pe_history
+            }
+        else:
+            forward_pe_result = {
+                'current': current_forward_pe,
+                'avg': 0,
+                'high': 0,
+                'low': 0,
+                'p25': 0,
+                'p75': 0,
+                'percentile': 50,
+                'vs_avg_pct': 0,
+                'vs_trailing': ((current_forward_pe / current_pe) - 1) * 100 if current_pe > 0 and current_forward_pe > 0 else 0,
+                'history': []
+            }
 
         return {
             'pe': pe_result,
@@ -1162,6 +1231,8 @@ def get_analyst_estimates(ticker: str) -> dict:
         result = {
             'fy0_eps': 0,
             'fy1_eps': 0,
+            'fy1_eps_low': 0,
+            'fy1_eps_high': 0,
             'fy1_growth': 0,
             'num_analysts': 0,
             'trailing_eps': info.get('trailingEps', 0) or 0,
@@ -1182,6 +1253,8 @@ def get_analyst_estimates(ticker: str) -> dict:
                 if '+1y' in earnings_est.index:
                     row = earnings_est.loc['+1y']
                     result['fy1_eps'] = float(row['avg']) if pd.notna(row['avg']) else 0
+                    result['fy1_eps_low'] = float(row['low']) if pd.notna(row.get('low')) else 0
+                    result['fy1_eps_high'] = float(row['high']) if pd.notna(row.get('high')) else 0
                     result['fy1_growth'] = float(row['growth']) if pd.notna(row['growth']) else 0
 
                     # num_analysts 업데이트 (더 많은 쪽으로)
@@ -1208,6 +1281,8 @@ def get_analyst_estimates(ticker: str) -> dict:
         return {
             'fy0_eps': 0,
             'fy1_eps': 0,
+            'fy1_eps_low': 0,
+            'fy1_eps_high': 0,
             'fy1_growth': 0,
             'num_analysts': 0,
             'trailing_eps': 0,

@@ -456,7 +456,8 @@ def get_stock_data(ticker: str) -> tuple:
         
         # 과거 재무 데이터 추출
         data['historical_financials'] = extract_historical(income_stmt, balance_sheet, cash_flow)
-        
+        data['quarterly_financials'] = extract_quarterly_historical(stock)
+
         # 주가 히스토리
         try:
             data['price_history'] = stock.history(period='2y')
@@ -524,8 +525,56 @@ def extract_historical(income_stmt, balance_sheet, cash_flow) -> list:
             row['capex_pct'] = row.get('capex', 0) / row['revenue']
         
         historical.append(row)
-    
+
     return historical
+
+
+def format_quarter(date) -> str:
+    """날짜를 Q3'24 형태로 변환"""
+    q = (date.month - 1) // 3 + 1
+    year = str(date.year)[-2:]
+    return f"Q{q}'{year}"
+
+
+def extract_quarterly_historical(stock) -> list:
+    """
+    분기별 재무 데이터 추출 (최근 8분기)
+
+    Returns:
+        [{'quarter': 'Q3'24', 'revenue': 35082000000, 'fcf': 15000000000}, ...]
+    """
+    quarterly = []
+
+    try:
+        q_income = stock.quarterly_income_stmt
+        q_cashflow = stock.quarterly_cashflow
+
+        if q_income is None or q_income.empty:
+            return quarterly
+
+        for col in q_income.columns[:8]:  # 최근 8분기
+            quarter_label = format_quarter(col)
+
+            revenue = safe_get(q_income, 'Total Revenue', col)
+
+            # FCF = Operating CF - CapEx
+            fcf = 0
+            if q_cashflow is not None and not q_cashflow.empty and col in q_cashflow.columns:
+                op_cf = safe_get(q_cashflow, 'Operating Cash Flow', col)
+                capex = abs(safe_get(q_cashflow, 'Capital Expenditure', col))
+                fcf = op_cf - capex if op_cf else 0
+
+            quarterly.append({
+                'quarter': quarter_label,
+                'date': col,
+                'revenue': revenue,
+                'fcf': fcf
+            })
+
+        # 날짜순 정렬 (과거 → 최신)
+        return sorted(quarterly, key=lambda x: x['date'])
+    except Exception:
+        return []
 
 
 def safe_get(df, row_name, col):

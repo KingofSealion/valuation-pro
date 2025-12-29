@@ -54,7 +54,7 @@ def classify_lifecycle(
             revenue_growth=revenue_growth,
             projection_years=10,
             stage_label="Hyper-Growth",
-            insight=f"매출 성장률 {revenue_growth*100:.1f}%로 Hyper-Growth 단계입니다. "
+            insight=f"매출 성장률 {revenue_growth*100:.1f}% (분기 YoY)로 Hyper-Growth 단계입니다. "
                     f"10년 projection으로 점진적 성장 둔화를 반영합니다."
         )
     elif revenue_growth > high_threshold:
@@ -63,7 +63,7 @@ def classify_lifecycle(
             revenue_growth=revenue_growth,
             projection_years=7,
             stage_label="High-Growth",
-            insight=f"매출 성장률 {revenue_growth*100:.1f}%로 High-Growth 단계입니다. "
+            insight=f"매출 성장률 {revenue_growth*100:.1f}% (분기 YoY)로 High-Growth 단계입니다. "
                     f"7년 projection이 적절합니다."
         )
     else:
@@ -72,7 +72,7 @@ def classify_lifecycle(
             revenue_growth=revenue_growth,
             projection_years=5,
             stage_label="Stable",
-            insight=f"매출 성장률 {revenue_growth*100:.1f}%로 Stable 단계입니다. "
+            insight=f"매출 성장률 {revenue_growth*100:.1f}% (분기 YoY)로 Stable 단계입니다. "
                     f"5년 projection으로 충분합니다."
         )
 

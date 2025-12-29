@@ -322,10 +322,17 @@ with tab1:
 
     # 성장률 계산 (FCF & Revenue)
     for i in range(1, len(fcf_data)):
+        curr_year = fcf_data[i]['year']
+        prev_year = fcf_data[i-1]['year']
+        # TTM vs FY는 기간 겹침으로 성장률 비교 무의미 → "-" 표시
+        is_ttm_vs_fy = (curr_year == 'TTM' and prev_year != 'TTM')
+
         # FCF Growth
         prev_fcf = fcf_data[i-1]['fcf']
         curr_fcf = fcf_data[i]['fcf']
-        if prev_fcf > 0 and curr_fcf > 0:
+        if is_ttm_vs_fy:
+            fcf_data[i]['fcf_growth'] = None
+        elif prev_fcf > 0 and curr_fcf > 0:
             fcf_data[i]['fcf_growth'] = (curr_fcf - prev_fcf) / prev_fcf
         else:
             fcf_data[i]['fcf_growth'] = None
@@ -333,7 +340,9 @@ with tab1:
         # Revenue Growth
         prev_rev = fcf_data[i-1]['revenue']
         curr_rev = fcf_data[i]['revenue']
-        if prev_rev > 0 and curr_rev > 0:
+        if is_ttm_vs_fy:
+            fcf_data[i]['rev_growth'] = None
+        elif prev_rev > 0 and curr_rev > 0:
             fcf_data[i]['rev_growth'] = (curr_rev - prev_rev) / prev_rev
         else:
             fcf_data[i]['rev_growth'] = None
@@ -360,7 +369,7 @@ with tab1:
     rev_cagr_3y = calc_cagr(fcf_data, 'revenue', 3)
     rev_cagr_5y = calc_cagr(fcf_data, 'revenue', 5)
 
-    # 2. Revenue Growth (TTM - DCF에 적합)
+    # 2. Revenue Growth (Quarterly YoY from yfinance)
     revenue_growth = data.get('revenue_growth', 0) or 0
 
     # 3. Historical Revenue CAGR (WallStreetDCF에서 계산)
@@ -369,23 +378,78 @@ with tab1:
 
     avg_growth = historical_fcf_cagr  # 기본값
 
-    # Revenue & FCF 테이블
-    table_data = {
-        '': ['Revenue (M)', 'Rev Growth', 'FCF (M)', 'FCF Growth']
-    }
-    for fd in fcf_data:
-        rev_g = fd.get('rev_growth')
-        fcf_g = fd.get('fcf_growth')
-        rev_g_str = f"{rev_g*100:.1f}%" if rev_g is not None else "-"
-        fcf_g_str = f"{fcf_g*100:.1f}%" if fcf_g is not None else "-"
-        table_data[fd['year']] = [
-            f"{fd['revenue']/1e6:,.0f}" if fd['revenue'] > 0 else "-",
-            rev_g_str,
-            f"{fd['fcf']/1e6:,.0f}" if fd['fcf'] != 0 else "-",
-            fcf_g_str
-        ]
+    # Revenue & FCF 테이블 - Annual/Quarterly 전환
+    view_mode = st.radio(
+        "View",
+        ["Annual", "Quarterly"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="financial_table_view"
+    )
 
-    st.dataframe(pd.DataFrame(table_data).set_index('').T, use_container_width=True)
+    if view_mode == "Annual":
+        # Annual 테이블 (기존)
+        table_data = {
+            '': ['Revenue (M)', 'Rev Growth', 'FCF (M)', 'FCF Growth']
+        }
+        for fd in fcf_data:
+            rev_g = fd.get('rev_growth')
+            fcf_g = fd.get('fcf_growth')
+            rev_g_str = f"{rev_g*100:.1f}%" if rev_g is not None else "-"
+            fcf_g_str = f"{fcf_g*100:.1f}%" if fcf_g is not None else "-"
+            table_data[fd['year']] = [
+                f"{fd['revenue']/1e6:,.0f}" if fd['revenue'] > 0 else "-",
+                rev_g_str,
+                f"{fd['fcf']/1e6:,.0f}" if fd['fcf'] != 0 else "-",
+                fcf_g_str
+            ]
+        st.dataframe(pd.DataFrame(table_data).set_index('').T, use_container_width=True)
+    else:
+        # Quarterly 테이블 (신규)
+        quarterly_data = data.get('quarterly_financials', [])
+        if not quarterly_data:
+            st.warning("Quarterly 데이터가 없습니다.")
+        else:
+            # YoY, QoQ 성장률 계산
+            for i, qd in enumerate(quarterly_data):
+                # QoQ: 이전 분기 대비
+                if i > 0:
+                    prev = quarterly_data[i-1]
+                    if prev['revenue'] > 0 and qd['revenue'] > 0:
+                        qd['rev_qoq'] = (qd['revenue'] - prev['revenue']) / prev['revenue']
+                    if prev['fcf'] != 0 and qd['fcf'] != 0:
+                        qd['fcf_qoq'] = (qd['fcf'] - prev['fcf']) / abs(prev['fcf'])
+
+                # YoY: 4분기 전 대비
+                if i >= 4:
+                    prev_yr = quarterly_data[i-4]
+                    if prev_yr['revenue'] > 0 and qd['revenue'] > 0:
+                        qd['rev_yoy'] = (qd['revenue'] - prev_yr['revenue']) / prev_yr['revenue']
+                    if prev_yr['fcf'] != 0 and qd['fcf'] != 0:
+                        qd['fcf_yoy'] = (qd['fcf'] - prev_yr['fcf']) / abs(prev_yr['fcf'])
+
+            # 최근 6분기만 표시
+            display_quarters = quarterly_data[-6:] if len(quarterly_data) >= 6 else quarterly_data
+
+            table_data = {
+                '': ['Revenue (M)', 'Rev YoY', 'Rev QoQ', 'FCF (M)', 'FCF YoY', 'FCF QoQ']
+            }
+            for qd in display_quarters:
+                yoy_str = f"{qd['rev_yoy']*100:.1f}%" if qd.get('rev_yoy') is not None else "-"
+                qoq_str = f"{qd['rev_qoq']*100:.1f}%" if qd.get('rev_qoq') is not None else "-"
+                fcf_yoy_str = f"{qd['fcf_yoy']*100:.1f}%" if qd.get('fcf_yoy') is not None else "-"
+                fcf_qoq_str = f"{qd['fcf_qoq']*100:.1f}%" if qd.get('fcf_qoq') is not None else "-"
+
+                table_data[qd['quarter']] = [
+                    f"{qd['revenue']/1e6:,.0f}" if qd['revenue'] > 0 else "-",
+                    yoy_str,
+                    qoq_str,
+                    f"{qd['fcf']/1e6:,.0f}" if qd['fcf'] != 0 else "-",
+                    fcf_yoy_str,
+                    fcf_qoq_str
+                ]
+
+            st.dataframe(pd.DataFrame(table_data).set_index('').T, use_container_width=True)
 
     # CAGR 요약
     st.markdown("**CAGR Summary**")
@@ -412,7 +476,7 @@ with tab1:
     auto_wacc = wacc_result['wacc'] * 100
     smart_growth_pct = smart_defaults['assumptions']['initial_growth'] * 100
     fcf_cagr_pct = historical_fcf_cagr * 100
-    revenue_ttm_pct = revenue_growth * 100
+    revenue_qtr_yoy_pct = revenue_growth * 100  # yfinance revenueGrowth = Quarterly YoY
     revenue_cagr_pct = revenue_cagr * 100
 
     # Smart Default 버튼 - 클릭 시 모든 값을 추천안으로 세팅
@@ -460,7 +524,7 @@ with tab1:
         <div class="guide-text">
         💡 <b>Reference:</b><br>
         • FCF CAGR: {fcf_cagr_pct:.1f}%<br>
-        • Revenue TTM: {revenue_ttm_pct:.1f}%<br>
+        • Revenue Qtr YoY: {revenue_qtr_yoy_pct:.1f}%<br>
         • Revenue CAGR (5Y): {revenue_cagr_pct:.1f}%
         </div>
         """, unsafe_allow_html=True)

@@ -831,30 +831,26 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
         if income_stmt is None or income_stmt.empty:
             return {'error': 'No income statement'}
 
-        # EPS 히스토리 구축 (연도별)
-        eps_by_year = {}
-        if 'Basic EPS' in income_stmt.index:
+        # EPS 히스토리 구축 (회계연도 종료일 기준)
+        # [(fiscal_year_end_date, eps_value), ...] 형태로 저장 후 정렬
+        eps_list = []
+        eps_row_name = 'Basic EPS' if 'Basic EPS' in income_stmt.index else 'Diluted EPS'
+        if eps_row_name in income_stmt.index:
             for col in income_stmt.columns:
-                year = col.year
-                eps_val = income_stmt.loc['Basic EPS', col]
+                eps_val = income_stmt.loc[eps_row_name, col]
                 if pd.notna(eps_val) and eps_val > 0:
-                    eps_by_year[year] = float(eps_val)
-        elif 'Diluted EPS' in income_stmt.index:
-            for col in income_stmt.columns:
-                year = col.year
-                eps_val = income_stmt.loc['Diluted EPS', col]
-                if pd.notna(eps_val) and eps_val > 0:
-                    eps_by_year[year] = float(eps_val)
+                    # col은 회계연도 종료일 (예: 2024-01-31)
+                    eps_list.append((col, float(eps_val)))
+        # 날짜 오름차순 정렬
+        eps_list.sort(key=lambda x: x[0])
 
-        # Book Value 히스토리 (Balance Sheet)
+        # Book Value 히스토리 (Balance Sheet) - 회계연도 종료일 기준
         balance_sheet = stock.balance_sheet
-        bvps_by_year = {}
-        shares_by_year = {}
+        bvps_list = []
+        shares = info.get('sharesOutstanding', 0)
 
-        if balance_sheet is not None and not balance_sheet.empty:
+        if balance_sheet is not None and not balance_sheet.empty and shares > 0:
             for col in balance_sheet.columns:
-                year = col.year
-                # Stockholders Equity
                 equity = None
                 for name in ['Stockholders Equity', 'Total Equity Gross Minority Interest', 'Common Stock Equity']:
                     if name in balance_sheet.index:
@@ -862,11 +858,31 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
                         if pd.notna(val):
                             equity = float(val)
                             break
+                if equity:
+                    bvps_list.append((col, equity / shares))
+        bvps_list.sort(key=lambda x: x[0])
 
-                # Shares Outstanding (추정)
-                shares = info.get('sharesOutstanding', 0)
-                if equity and shares > 0:
-                    bvps_by_year[year] = equity / shares
+        # 주어진 날짜에 해당하는 EPS 찾기 (해당 날짜 이전의 가장 최근 회계연도 EPS)
+        def find_eps_for_date(price_date, eps_list):
+            """주가 날짜에 해당하는 EPS 반환 (회계연도 종료일 이후의 EPS 사용)"""
+            result_eps = None
+            for fy_end_date, eps_val in eps_list:
+                # 회계연도 종료일이 주가 날짜보다 이전이면 해당 EPS 사용 가능
+                if fy_end_date.tz_localize(None) <= price_date.tz_localize(None):
+                    result_eps = eps_val
+                else:
+                    break
+            return result_eps
+
+        def find_bvps_for_date(price_date, bvps_list):
+            """주가 날짜에 해당하는 BVPS 반환"""
+            result_bvps = None
+            for fy_end_date, bvps_val in bvps_list:
+                if fy_end_date.tz_localize(None) <= price_date.tz_localize(None):
+                    result_bvps = bvps_val
+                else:
+                    break
+            return result_bvps
 
         # PE 히스토리 계산 (일별)
         pe_history = []
@@ -875,16 +891,14 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
         # 일별 데이터로 계산
         for date_idx, row in hist.iterrows():
             close_price = row['Close']
-            year = date_idx.year
             date_str = date_idx.strftime('%Y-%m-%d')
 
-            # 해당 연도의 EPS 사용 (회계연도 기준 근사)
-            # 회계연도가 다를 수 있으므로, 해당 연도 또는 이전 연도 EPS 사용
-            eps_for_period = eps_by_year.get(year) or eps_by_year.get(year - 1) or eps_by_year.get(year + 1)
+            # 해당 날짜에 적용할 EPS 찾기 (회계연도 종료일 기준)
+            eps_for_period = find_eps_for_date(date_idx, eps_list)
 
             if eps_for_period and eps_for_period > 0:
                 pe = close_price / eps_for_period
-                if 0 < pe < 200:  # 이상치 제거
+                if 0 < pe < 500:  # 이상치 제거 (상한 완화)
                     pe_history.append({
                         'date': date_str,
                         'price': float(close_price),
@@ -893,7 +907,7 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
                     })
 
             # PB 계산
-            bvps_for_period = bvps_by_year.get(year) or bvps_by_year.get(year - 1)
+            bvps_for_period = find_bvps_for_date(date_idx, bvps_list)
             if bvps_for_period and bvps_for_period > 0:
                 pb = close_price / bvps_for_period
                 if 0 < pb < 100:

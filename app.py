@@ -1748,6 +1748,9 @@ with tab2:
     else:
         pe_default = 20.0
 
+    # P/E max_value 동적 설정 (기본값보다 높으면 여유 있게)
+    pe_max = max(200.0, pe_default * 1.5)
+
     # 입력 영역
     st.markdown(f"**Assumptions** (Analyst: {num_analysts}, Est. Growth: {fy1_growth*100:.1f}%)")
 
@@ -1756,7 +1759,7 @@ with tab2:
         target_pe = st.number_input(
             "Target P/E",
             min_value=5.0,
-            max_value=100.0,
+            max_value=pe_max,
             value=round(pe_default, 1),
             step=0.5,
             format="%.1f",
@@ -1803,11 +1806,11 @@ with tab2:
     # Target Price 계산
     def calc_upside_color(upside):
         if upside > 15:
-            return "#22c55e", "▲"
+            return "#22c55e"
         elif upside < -15:
-            return "#ef4444", "▼"
+            return "#ef4444"
         else:
-            return "#f59e0b", "─"
+            return "#f59e0b"
 
     fy1_target = target_pe * fy1_eps_input
     fy2_target = target_pe * fy2_eps_input
@@ -1817,9 +1820,9 @@ with tab2:
     fy2_upside = (fy2_target / current_price - 1) * 100 if current_price > 0 else 0
     fy3_upside = (fy3_target / current_price - 1) * 100 if current_price > 0 else 0
 
-    fy1_color, fy1_arrow = calc_upside_color(fy1_upside)
-    fy2_color, fy2_arrow = calc_upside_color(fy2_upside)
-    fy3_color, fy3_arrow = calc_upside_color(fy3_upside)
+    fy1_color = calc_upside_color(fy1_upside)
+    fy2_color = calc_upside_color(fy2_upside)
+    fy3_color = calc_upside_color(fy3_upside)
 
     # 결과 테이블
     st.markdown("**Target Price by Year**")
@@ -1840,26 +1843,29 @@ with tab2:
                 <td style="padding:12px;">${fy1_eps_input:.2f}</td>
                 <td style="padding:12px;">{target_pe:.1f}x</td>
                 <td style="padding:12px; font-weight:600;">${fy1_target:.2f}</td>
-                <td style="padding:12px; color:{fy1_color}; font-weight:600;">{fy1_arrow} {fy1_upside:+.1f}%</td>
+                <td style="padding:12px; color:{fy1_color}; font-weight:600;">{fy1_upside:+.1f}%</td>
             </tr>
             <tr style="border-bottom:1px solid #dee2e6;">
                 <td style="padding:12px; font-weight:600;">FY2 (2Y)</td>
                 <td style="padding:12px;">${fy2_eps_input:.2f}</td>
                 <td style="padding:12px;">{target_pe:.1f}x</td>
                 <td style="padding:12px; font-weight:600;">${fy2_target:.2f}</td>
-                <td style="padding:12px; color:{fy2_color}; font-weight:600;">{fy2_arrow} {fy2_upside:+.1f}%</td>
+                <td style="padding:12px; color:{fy2_color}; font-weight:600;">{fy2_upside:+.1f}%</td>
             </tr>
             <tr>
                 <td style="padding:12px; font-weight:600;">FY3 (3Y)</td>
                 <td style="padding:12px;">${fy3_eps_input:.2f}</td>
                 <td style="padding:12px;">{target_pe:.1f}x</td>
                 <td style="padding:12px; font-weight:600;">${fy3_target:.2f}</td>
-                <td style="padding:12px; color:{fy3_color}; font-weight:600;">{fy3_arrow} {fy3_upside:+.1f}%</td>
+                <td style="padding:12px; color:{fy3_color}; font-weight:600;">{fy3_upside:+.1f}%</td>
             </tr>
         </tbody>
     </table>
     <p style="text-align:right; color:#888; font-size:0.8em; margin-top:8px;">
-        Current Price: ${current_price:.2f}
+        Current Price: ${current_price:.2f} |
+        <span style="color:#22c55e;">■</span> &gt;15% Undervalued |
+        <span style="color:#f59e0b;">■</span> Fair Value |
+        <span style="color:#ef4444;">■</span> &lt;-15% Overvalued
     </p>
     """, unsafe_allow_html=True)
 

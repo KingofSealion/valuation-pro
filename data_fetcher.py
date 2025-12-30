@@ -1009,7 +1009,8 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
                 pe_percentile = 50
 
             pe_result = {
-                'current': current_pe,
+                'current': current_pe,  # TTM EPS 기반
+                'annual': pe_history[-1]['pe'] if pe_history else current_pe,  # 연간 EPS 기반 (차트 마지막 값)
                 'avg': pe_avg,
                 'high': pe_high,
                 'low': pe_low,
@@ -1020,7 +1021,7 @@ def get_historical_valuation(ticker: str, years: int = 5) -> dict:
                 'history': pe_history
             }
         else:
-            pe_result = {'current': current_pe, 'avg': 0, 'high': 0, 'low': 0, 'p25': 0, 'p75': 0, 'percentile': 50, 'vs_avg_pct': 0, 'history': []}
+            pe_result = {'current': current_pe, 'annual': current_pe, 'avg': 0, 'high': 0, 'low': 0, 'p25': 0, 'p75': 0, 'percentile': 50, 'vs_avg_pct': 0, 'history': []}
 
         # PB 통계
         if pb_history:

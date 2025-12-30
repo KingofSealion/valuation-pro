@@ -1393,16 +1393,19 @@ with tab2:
         pb_data = hist_val['pb']
         fwd_pe_data = hist_val['forward_pe']
 
-        # PEG 계산
-        if trailing_eps > 0 and forward_eps > 0:
-            eps_growth_rate = ((forward_eps - trailing_eps) / trailing_eps) * 100  # %
-        else:
-            eps_growth_rate = data.get('earnings_growth', 0) or 0
-            if eps_growth_rate and eps_growth_rate > 1:  # 이미 % 형태가 아닌 경우
-                eps_growth_rate = eps_growth_rate * 100
+        # PEG 계산 - Forward P/E + Analyst FY1 Growth (Finviz/Nasdaq 방식)
+        forward_pe = data.get('forward_pe', 0) or 0
 
-        if eps_growth_rate > 0 and pe_data['current'] > 0:
-            peg_ratio = pe_data['current'] / eps_growth_rate
+        # Analyst FY1 성장률 가져오기
+        analyst_est = get_analyst_estimates(ticker)
+        eps_growth_rate = analyst_est.get('fy1_growth', 0) or 0
+
+        # fy1_growth는 소수점 형태 (0.05 = 5%), % 변환 필요
+        if eps_growth_rate and abs(eps_growth_rate) < 1:
+            eps_growth_rate = eps_growth_rate * 100
+
+        if eps_growth_rate > 0 and forward_pe > 0:
+            peg_ratio = forward_pe / eps_growth_rate
         else:
             peg_ratio = None
 
@@ -1434,14 +1437,14 @@ with tab2:
                 <div style="background: #e5e7eb; border-radius: 10px; height: 24px; position: relative; margin: 15px 0;">
                     <div style="position: absolute; left: 50%; transform: translateX(-50%); width: 3px;
                                 height: 100%; background: #667eea; border-radius: 3px;"></div>
-                    <div style="position: absolute; left: {min(max((pe_data['current'] - pe_data['low']) / (pe_data['high'] - pe_data['low']) * 100, 0), 100):.0f}%;
+                    <div style="position: absolute; left: {min(max((pe_data.get('annual', pe_data['current']) - pe_data['low']) / (pe_data['high'] - pe_data['low']) * 100, 0), 100):.0f}%;
                                 transform: translateX(-50%); width: 16px; height: 24px;
                                 background: {pe_color}; border-radius: 4px;"></div>
                 </div>
                 <div style="text-align: center; margin-top: 10px;">
-                    <span style="font-size: 1.5rem; font-weight: bold; color: {pe_color};">{pe_data['current']:.1f}x</span>
-                    <span style="font-size: 0.9rem; color: {pe_color}; margin-left: 10px;">({pe_vs_avg:+.1f}% vs Avg)</span>
-                    <br><span style="font-size: 0.85rem; color: #666;">{pe_status} | {pe_data['percentile']:.0f}th Percentile</span>
+                    <span style="font-size: 1.5rem; font-weight: bold; color: {pe_color};">{pe_data.get('annual', pe_data['current']):.1f}x</span>
+                    <span style="font-size: 0.85rem; color: #888;">(Annual)</span>
+                    <br><span style="font-size: 0.85rem; color: #666;">{pe_data['percentile']:.0f}th Percentile</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -1466,8 +1469,9 @@ with tab2:
                     <h4 style="margin:0 0 15px 0;">Trailing vs Forward P/E</h4>
                     <div style="display: flex; justify-content: space-around; text-align: center;">
                         <div>
-                            <div style="font-size: 0.85rem; color: #666;">Trailing P/E</div>
+                            <div style="font-size: 0.85rem; color: #666;">TTM P/E</div>
                             <div style="font-size: 1.8rem; font-weight: bold; color: #667eea;">{pe_data['current']:.1f}x</div>
+                            <div style="font-size: 0.75rem; color: #999;">Annual: {pe_data.get('annual', pe_data['current']):.1f}x</div>
                         </div>
                         <div style="font-size: 2rem; color: #ccc; align-self: center;">→</div>
                         <div>
@@ -1519,13 +1523,13 @@ with tab2:
                     insight_msg = "Growth doesn't justify current valuation"
                     insight_color = "#ef4444"
                 else:
-                    insight_msg = f"P/E {pe_data['current']:.1f}x ÷ EPS Growth {eps_growth_rate:.1f}%"
+                    insight_msg = f"Fwd P/E {forward_pe:.1f}x ÷ Growth {eps_growth_rate:.1f}%"
                     insight_color = "#6b7280"
 
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, rgba(168,85,247,0.1), rgba(139,92,246,0.1));
                             padding: 20px; border-radius: 12px; border-left: 5px solid #a855f7; height: 100%;">
-                    <h4 style="margin:0 0 15px 0;">PEG Ratio Analysis</h4>
+                    <h4 style="margin:0 0 15px 0;">PEG Ratio</h4>
                     <div style="text-align: center;">
                         <div style="font-size: 2.5rem; font-weight: bold; color: {peg_color};">{peg_ratio:.2f}x</div>
                         <div style="font-size: 1.1rem; color: {peg_color}; margin: 5px 0;">{peg_emoji} {peg_status}</div>
@@ -1546,7 +1550,7 @@ with tab2:
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, rgba(168,85,247,0.1), rgba(139,92,246,0.1));
                             padding: 20px; border-radius: 12px; border-left: 5px solid #a855f7; height: 100%;">
-                    <h4 style="margin:0 0 15px 0;">PEG Ratio Analysis</h4>
+                    <h4 style="margin:0 0 15px 0;">PEG Ratio</h4>
                     <div style="text-align: center; padding: 20px 0;">
                         <div style="font-size: 1.2rem; color: #888;">N/A</div>
                         <div style="font-size: 0.85rem; color: #666; margin-top: 5px;">{reason}</div>
@@ -1574,12 +1578,12 @@ with tab2:
                 # Average line
                 fig_pe.add_hline(y=pe_data['avg'], line_dash="dash", line_color="#f59e0b",
                                 annotation_text=f"{hist_period}Y Avg: {pe_data['avg']:.1f}x")
-                # Current marker
+                # Current marker (TTM 기준)
                 fig_pe.add_hline(y=pe_data['current'], line_dash="dot", line_color="#22c55e",
-                                annotation_text=f"Current: {pe_data['current']:.1f}x", annotation_position="bottom right")
+                                annotation_text=f"Current (TTM): {pe_data['current']:.1f}x", annotation_position="bottom right")
 
                 fig_pe.update_layout(
-                    title=f"{ticker} Historical Trailing P/E",
+                    title=f"{ticker} Historical P/E (Annual EPS)",
                     xaxis_title="",
                     yaxis_title="P/E Ratio",
                     height=300,
@@ -1591,13 +1595,13 @@ with tab2:
         # PEG 인사이트 박스
         if peg_ratio is not None:
             if peg_ratio < 1:
-                peg_insight = f"💡 **PEG Insight**: Current PEG {peg_ratio:.2f}x < 1 indicates stock may be **undervalued relative to growth**. Even if P/E ({pe_data['current']:.1f}x) looks high, growth rate ({eps_growth_rate:.1f}%) justifies the valuation."
+                peg_insight = f"💡 **PEG Insight**: Forward PEG {peg_ratio:.2f}x < 1 indicates stock may be **undervalued relative to growth**. Forward P/E ({forward_pe:.1f}x) justified by growth rate ({eps_growth_rate:.1f}%)."
                 insight_type = "success"
             elif peg_ratio <= 1.5:
-                peg_insight = f"💡 **PEG Insight**: Current PEG {peg_ratio:.2f}x ≈ 1 suggests **fair valuation**. Price reflects expected earnings growth appropriately."
+                peg_insight = f"💡 **PEG Insight**: Forward PEG {peg_ratio:.2f}x ≈ 1 suggests **fair valuation**. Forward P/E ({forward_pe:.1f}x) reflects expected earnings growth appropriately."
                 insight_type = "info"
             else:
-                peg_insight = f"⚠️ **PEG Insight**: Current PEG {peg_ratio:.2f}x > 1.5 suggests stock may be **overvalued relative to growth**. P/E ({pe_data['current']:.1f}x) not fully justified by growth rate ({eps_growth_rate:.1f}%)."
+                peg_insight = f"⚠️ **PEG Insight**: Forward PEG {peg_ratio:.2f}x > 1.5 suggests stock may be **overvalued relative to growth**. Forward P/E ({forward_pe:.1f}x) not fully justified by growth rate ({eps_growth_rate:.1f}%)."
                 insight_type = "warning"
 
             if insight_type == "success":
@@ -2172,8 +2176,8 @@ with tab3:
         dcf_price = st.session_state['dcf_result']['dcf_price']
         avg_target = target_mean if target_mean > 0 else dcf_price
 
-        # 평균 적정가
-        fair_values = [item['mid'] for item in valuation_ranges if 'DCF' in item['category'] or 'Peer' in item['category']]
+        # 평균 적정가 (DCF + Relative Valuation + Analyst Targets)
+        fair_values = [item['mid'] for item in valuation_ranges if item['category'] in ['DCF Valuation', 'Relative Valuation', 'Analyst Targets']]
         if fair_values:
             avg_fair = sum(fair_values) / len(fair_values)
             upside = (avg_fair / current_price - 1) * 100 if current_price > 0 else 0
@@ -2203,4 +2207,4 @@ with tab3:
                 """, unsafe_allow_html=True)
 
 st.divider()
-st.caption(f"⚠️ Sometimes Numbers Lie. Do More Research for Successful Investment. | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+st.caption(f"⚠️ 무료 API 사용 등으로 인해 수치가 정확하지 않으므로, 상세 수치 확인은 Finviz를 활용하고 이 앱은 간단한 계산에만 활용할 것. | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
